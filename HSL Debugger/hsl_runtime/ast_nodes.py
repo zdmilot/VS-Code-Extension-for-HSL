@@ -139,6 +139,21 @@ class BreakStatement(ASTNode):
     pass
 
 @dataclass
+class LockStatement(ASTNode):
+    """lock; -- begin a non-interruptible execution region."""
+    pass
+
+@dataclass
+class UnlockStatement(ASTNode):
+    """unlock; -- end a non-interruptible execution region."""
+    pass
+
+@dataclass
+class RuntimeExecute(ASTNode):
+    """<< expression; -- parse and execute HSL source at runtime."""
+    source: Any = None
+
+@dataclass
 class ReturnStatement(ASTNode):
     """return or return(value)"""
     value: Any = None  # Optional expression
@@ -159,6 +174,11 @@ class OnErrorGoto(ASTNode):
 @dataclass
 class ResumeNext(ASTNode):
     """resume next"""
+    pass
+
+@dataclass
+class OnErrorResumeNext(ASTNode):
+    """onerror resume next -- suppress the next runtime error."""
     pass
 
 @dataclass
@@ -186,6 +206,7 @@ class VariableDeclaration(ASTNode):
     is_reference: bool = False
     # For device: (layout_file, device_name, flag)
     device_args: list = field(default_factory=list)
+    constructor_args: list = field(default_factory=list)
 
 @dataclass
 class Parameter(ASTNode):
@@ -204,7 +225,9 @@ class FunctionDeclaration(ASTNode):
     body: Any = None  # Block, or None for forward declarations
     is_private: bool = False
     is_static: bool = False
+    is_synchronized: bool = False
     is_method: bool = False  # True for 'method' keyword (entry point)
+    is_workflow: bool = False
 
 @dataclass
 class NamespaceDeclaration(ASTNode):
@@ -220,6 +243,13 @@ class SchedulerOnlyBlock(ASTNode):
 @dataclass
 class ExecutorOnlyBlock(ASTNode):
     """executoronly { ... }"""
+    body: Any = None
+
+@dataclass
+class SchedulerBlock(ASTNode):
+    """activity(...) { ... } or actionblock(...) { ... }."""
+    kind: str = ""
+    arguments: list = field(default_factory=list)
     body: Any = None
 
 

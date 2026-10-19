@@ -547,15 +547,11 @@ This document reviews every major claim in the HSL Reference Guide for correctne
 
 These are items where **our simulation runtime** (`hsl_runtime/`) differs from the language described in the guide. The guide is correct in these cases; our implementation is incomplete or incorrect.
 
-### Critical Mismatches
+### Current Notable Mismatches
 
 | Item | Reference Guide | Our Implementation | Impact |
 |------|-----------------|-------------------|--------|
-| **`hslInteger`, `hslFloat`, `hslString` values** | `"i"`, `"f"`, `"s"` | `"hslInteger"`, `"hslFloat"`, `"hslString"` | **High** -- `GetType()` will return wrong values; `InputBox()` type parameter will mismatch |
-| **Power operator `^`** | Real HSL operator, right-associative | Not implemented at all | **Medium** -- Any code using `^` (e.g., `arr[v1] = (v1 + v2)^2`) will fail to parse |
-| **Bitwise AND `&`** | Binary expression operator for bit operations | Only used as reference marker (`&` param) | **Medium** -- Bitwise AND expressions will not evaluate |
-| **`loop(N)` statement** | Real HSL iteration construct | Not implemented | **Medium** -- `loop` blocks won't parse |
-| **`struct` keyword** | Real HSL feature for user-defined types | Not implemented | **Medium** -- struct declarations won't parse |
+| **`struct` values** | Real HSL feature for user-defined types | Declarations are consumed, but values and member semantics are not simulated | **Medium** -- methods that depend on structure state cannot be validated fully |
 
 ### Missing Features (Lower Priority)
 
@@ -576,7 +572,7 @@ These are items where **our simulation runtime** (`hsl_runtime/`) differs from t
 
 These features from the guide are correctly implemented in our simulation:
 
-- All preprocessor directives (`#include`, `#define`, `#ifdef`, `#ifndef`, `#endif`, `#pragma once`)
+- Common preprocessor directives (`#include`, `#define`, `#ifdef`, `#ifndef`, `#endif`, `#pragma once`)
 - `#include __filename__` extension substitution
 - All basic data types (`variable`, `string`, `sequence`, `device`, `dialog`, `object`, `timer`, `event`, `file`)
 - Namespaces with `::` scope resolution
@@ -591,6 +587,10 @@ These features from the guide are correctly implemented in our simulation:
 - All comparison operators (`<`, `<=`, `==`, `!=`, `>=`, `>`)
 - Logical operators (`&&`, `||`, `!`)
 - Bitwise OR (`|`)
+- Bitwise AND (`&`)
+- Right-associative power (`^`)
+- `loop(N)` statements
+- Correct `hslInteger`/`hslFloat`/`hslString` constant values (`"i"`/`"f"`/`"s"`)
 - Increment/decrement (`++`/`--`)
 - String element functions (`GetLength`, `Mid`, `Left`, `Right`, `Find`, etc.)
 - Array element functions (`SetSize`, `GetSize`, `SetAt`, `GetAt`, `AddAsLast`)
@@ -616,12 +616,4 @@ The guide's community notes are also accurate and provide valuable practical gui
 
 ### Simulation Runtime Gaps
 
-Our simulation runtime correctly implements the core language features but has these **5 notable gaps** compared to what the guide describes:
-
-1. **`hslInteger`/`hslFloat`/`hslString` constant values are wrong** -- should be `"i"`/`"f"`/`"s"`, not `"hslInteger"`/`"hslFloat"`/`"hslString"`
-2. **Power operator `^`** -- not implemented
-3. **Bitwise AND `&`** -- not implemented as expression operator
-4. **`loop(N)` statement** -- not implemented
-5. **`struct` keyword** -- not implemented
-
-Items 2-5 are language features that would need parser and interpreter additions. Item 1 is a simple constant value fix.
+The earlier constant, power, bitwise-AND, and `loop(N)` gaps have been implemented. The principal core-language gap is full `struct` value/member behavior; scheduler, threading, COM, and hardware behavior remain intentional simulation boundaries.

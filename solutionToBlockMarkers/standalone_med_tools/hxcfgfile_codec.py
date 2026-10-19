@@ -917,27 +917,33 @@ def build_binary_med(model: HxCfgTextModel) -> bytes:
 
 
 def binary_to_text_file(input_path: Path, output_path: Path) -> None:
-    """Convert a binary .med/.stp file to its textual representation.
+    """Convert a binary .med/.stp file to its textual representation using the CLI converter.
 
     Args:
         input_path:  Path to the source binary file.
         output_path: Path where the text output will be written.
     """
-    model: HxCfgTextModel = parse_binary_med(input_path.read_bytes())
-    output_path.write_text(build_text_med(model), encoding="latin1", newline="")
+    import subprocess
+    converter = Path(r"C:\Program Files (x86)\Hamilton\7 - Created Utilities and Scripts\Programatic Method and Venus File Generation Playground\tooling\Hamilton-Binary-ASCII-Converter\Hamilton-Binary-ASCII-Converter.exe")
+    if not converter.exists():
+        raise FileNotFoundError(f"Converter not found at {converter}")
+    
+    subprocess.run([str(converter), "--ascii", str(input_path), "--output", str(output_path), "--no-backup"], check=True)
 
 
 def text_to_binary_file(input_path: Path, output_path: Path) -> None:
-    """Convert a textual .med/.stp representation back to binary.
+    """Convert a textual .med/.stp representation back to binary using the CLI converter.
 
     Args:
         input_path:  Path to the source text file.
         output_path: Path where the binary output will be written.
     """
-    model: HxCfgTextModel = parse_text_med(
-        input_path.read_text(encoding="latin1")
-    )
-    output_path.write_bytes(build_binary_med(model))
+    import subprocess
+    converter = Path(r"C:\Program Files (x86)\Hamilton\7 - Created Utilities and Scripts\Programatic Method and Venus File Generation Playground\tooling\Hamilton-Binary-ASCII-Converter\Hamilton-Binary-ASCII-Converter.exe")
+    if not converter.exists():
+        raise FileNotFoundError(f"Converter not found at {converter}")
+    
+    subprocess.run([str(converter), "--binary", str(input_path), "--output", str(output_path), "--no-backup"], check=True)
 
 
 # ---------------------------------------------------------------------------

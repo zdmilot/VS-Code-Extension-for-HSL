@@ -27,8 +27,9 @@ class Preprocessor:
     # Default Hamilton installation paths
     DEFAULT_HAMILTON_DIR = r"C:\Program Files (x86)\Hamilton"
 
-    def __init__(self, hamilton_dir: Optional[str] = None):
+    def __init__(self, hamilton_dir: Optional[str] = None, strict: bool = False):
         self.hamilton_dir = hamilton_dir or self.DEFAULT_HAMILTON_DIR
+        self.strict = strict
         self.search_paths = [
             os.path.join(self.hamilton_dir, "Library"),
             os.path.join(self.hamilton_dir, "Methods"),
@@ -42,6 +43,7 @@ class Preprocessor:
         self.source_map: list[tuple[str, int]] = []  # (original_file, original_line)
         self._current_file = ""
         self._max_include_depth = 50
+        self._basename_cache: dict[str, Optional[str]] = {}
 
         # Always define HSL_RUNTIME for simulation mode
         self.defines["HSL_RUNTIME"] = "1"
@@ -86,6 +88,34 @@ class Preprocessor:
         if os.path.isabs(include_path) and os.path.isfile(include_path):
             return include_path
 
+        # Exported methods often retain an absolute path from another VENUS
+        # workstation. If exactly one file with the same basename exists in
+        # the active Hamilton Library/Methods trees, use that unambiguous
+        # local equivalent. Never guess when multiple candidates exist.
+        basename = os.path.basename(include_path.replace('/', os.sep))
+        key = basename.lower()
+        if basename:
+            if key not in self._basename_cache:
+                matches = []
+                for root_name in ("Library", "Methods"):
+                    root = os.path.join(self.hamilton_dir, root_name)
+                    if not os.path.isdir(root):
+                        continue
+                    for directory, _, filenames in os.walk(root):
+                        for filename in filenames:
+                            if filename.lower() == key:
+                                matches.append(os.path.join(directory, filename))
+                                if len(matches) > 1:
+                                    break
+                        if len(matches) > 1:
+                            break
+                    if len(matches) > 1:
+                        break
+                self._basename_cache[key] = matches[0] if len(matches) == 1 else None
+            fallback = self._basename_cache[key]
+            if fallback is not None:
+                return fallback
+
         return None
 
     def preprocess_file(self, filepath: str) -> str:
@@ -98,8 +128,7 @@ class Preprocessor:
         file_dir = os.path.dirname(filepath)
         self.add_search_path(file_dir)
 
-        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
+        content = self._read_source_file(filepath)
 
         return self.preprocess(content, filepath)
 
@@ -122,12 +151,29 @@ class Preprocessor:
         self.include_stack.append(filepath_norm)
         self.included_files.add(filepath_norm)
 
+        try:
+            return self._preprocess_content(source, filepath)
+        finally:
+            # A failed nested include must not poison later files processed by
+            # the same Preprocessor instance. Remove this exact frame even if
+            # an inner include raised before it could return normally.
+            for index in range(len(self.include_stack) - 1, -1, -1):
+                if self.include_stack[index] == filepath_norm:
+                    del self.include_stack[index]
+                    break
+
+    def _preprocess_content(self, source: str, filepath: str) -> str:
+        """Process one source unit after its include frame has been installed."""
         lines = source.split('\n')
         output_lines = []
         condition_stack: list[bool] = []  # Stack of if/ifdef conditions: True = active
+        in_block_comment = False
 
         for line_num, line in enumerate(lines, 1):
-            stripped = line.strip()
+            directive_line, in_block_comment = self._without_comments(
+                line, in_block_comment
+            )
+            stripped = directive_line.strip()
 
             # Handle preprocessor directives
             if stripped.startswith('#'):
@@ -152,7 +198,7 @@ class Preprocessor:
             # Handle inline includes: namespace _Method { #include "file.hsl" }
             inline_include = re.match(
                 r'(.*?)\s*#include\s+(".*?"|<.*?>|__filename__\s*"[^"]*")\s*(.*)',
-                line
+                directive_line
             )
             if inline_include:
                 prefix = inline_include.group(1).strip()
@@ -181,8 +227,81 @@ class Preprocessor:
             output_lines.append(processed_line)
             self.source_map.append((filepath, line_num))
 
-        self.include_stack.pop()
         return '\n'.join(output_lines)
+
+    @staticmethod
+    def _read_source_file(filepath: str) -> str:
+        """Read UTF-8 exports and legacy ANSI/Windows-1252 Hamilton files."""
+        data = Path(filepath).read_bytes()
+        try:
+            return data.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            return data.decode('cp1252')
+
+    @staticmethod
+    def _without_comments(line: str, in_block_comment: bool) -> tuple[str, bool]:
+        """Mask comments so sample `#include` text is never executed."""
+        output: list[str] = []
+        index = 0
+        quote = ""
+        while index < len(line):
+            if in_block_comment:
+                end = line.find('*/', index)
+                if end < 0:
+                    return ''.join(output), True
+                index = end + 2
+                in_block_comment = False
+                continue
+
+            char = line[index]
+            if quote:
+                output.append(char)
+                if char == '\\' and index + 1 < len(line):
+                    output.append(line[index + 1])
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = ""
+                index += 1
+                continue
+
+            if char in ('"', "'"):
+                quote = char
+                output.append(char)
+                index += 1
+                continue
+            if line.startswith('//', index):
+                break
+            if line.startswith('/*', index):
+                in_block_comment = True
+                index += 2
+                continue
+
+            output.append(char)
+            index += 1
+
+        return ''.join(output), in_block_comment
+
+    @classmethod
+    def _include_guard_symbol(cls, source: str) -> Optional[str]:
+        """Return a conventional leading #ifndef/#define include guard."""
+        meaningful: list[str] = []
+        in_block_comment = False
+        for line in source.splitlines():
+            code, in_block_comment = cls._without_comments(line, in_block_comment)
+            stripped = code.strip()
+            if stripped:
+                meaningful.append(stripped)
+                if len(meaningful) == 2:
+                    break
+        if len(meaningful) < 2:
+            return None
+        guard = re.fullmatch(r'#ifndef\s+(\w+)', meaningful[0])
+        if not guard:
+            return None
+        symbol = guard.group(1)
+        definition = re.match(r'#define\s+' + re.escape(symbol) + r'(?:\s|$)', meaningful[1])
+        return symbol if definition else None
 
     def _handle_directive(self, line: str, filepath: str, line_num: int,
                           condition_stack: list[bool]) -> Optional[str]:
@@ -277,8 +396,12 @@ class Preprocessor:
             resolved = self.resolve_include(cleaned, filepath)
 
         if resolved is None:
-            # Non-fatal: return a comment noting the missing include
             cleaned = inc_path.strip('"').strip('<').strip('>')
+            if self.strict:
+                raise PreprocessorError(
+                    f"Include not found: {cleaned}", filepath, line_num
+                )
+            # Non-fatal in permissive simulation mode.
             return f"/* [PREPROCESSOR] Include not found: {cleaned} */"
 
         resolved_norm = os.path.normpath(resolved)
@@ -288,10 +411,24 @@ class Preprocessor:
             return ""
 
         try:
-            with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
-                content = f.read()
+            content = self._read_source_file(resolved)
+            guard_symbol = self._include_guard_symbol(content)
+            if guard_symbol and guard_symbol in self.defines:
+                return ""
+            if resolved_norm in self.include_stack:
+                # Hamilton's installed VM libraries contain an intentional
+                # unguarded mutual include. The translator treats active-file
+                # re-entry as already included, so mirror that behavior while
+                # still rejecting paths that cannot be resolved at all.
+                return ""
             return self.preprocess(content, resolved)
         except Exception as e:
+            if self.strict:
+                if isinstance(e, PreprocessorError):
+                    raise
+                raise PreprocessorError(
+                    f"Error including {resolved}: {e}", filepath, line_num
+                ) from e
             return f"/* [PREPROCESSOR] Error including {resolved}: {e} */"
 
     def _substitute_defines(self, line: str) -> str:

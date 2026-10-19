@@ -1,9 +1,10 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { ELEMENT_FUNCTIONS, BUILTIN_FUNCTIONS, type ElementFunction } from "./builtins";
+import { ELEMENT_FUNCTIONS, type ElementFunction } from "./builtins";
+import { isAbsoluteWindowsPath, resolveHslIncludeTarget } from "./hslCore";
 
-const DEFAULT_LIBRARY_ROOT = "C:\\Program Files (x86)\\Hamilton\\Library";
+const DEFAULT_HAMILTON_DIR = "C:\\Program Files (x86)\\Hamilton";
 const INDEX_CACHE_FILE = "hsl-global-index-cache.json";
 
 /**
@@ -65,20 +66,6 @@ const SYSTEM_ELEMENT_SYMBOL_MAP: Map<string, HslFunctionSymbol[]> = (() => {
   return map;
 })();
 
-/**
- * A set of lowercase function names that are system-defined builtins (non-element).
- * Used to prevent library-parsed symbols from overriding system definitions.
- */
-const SYSTEM_BUILTIN_NAME_SET: Set<string> = new Set(
-  BUILTIN_FUNCTIONS.map((fn) => fn.name.toLowerCase())
-);
-
-/** Combined set: all system-defined names (builtins + element methods). */
-const SYSTEM_DEFINED_NAMES: Set<string> = new Set([
-  ...SYSTEM_BUILTIN_NAME_SET,
-  ...Array.from(SYSTEM_ELEMENT_SYMBOL_MAP.keys()),
-]);
-
 interface HslParameter {
   typeText: string;
   nameText: string;
@@ -106,6 +93,7 @@ interface ParsedInclude {
   rawTarget: string;
   resolvedPath?: string;
   isAbsolute: boolean;
+  lineIndex: number;
 }
 
 interface FileParseResult {
@@ -123,7 +111,8 @@ interface CacheFileRecord {
 }
 
 interface GlobalCacheFile {
-  libraryRoot: string;
+  version: 2;
+  libraryRoots: string[];
   createdAt: number;
   records: CacheFileRecord[];
 }
@@ -139,14 +128,21 @@ function normalizeWindowsPath(filePath: string): string {
   return path.win32.normalize(filePath).toLowerCase();
 }
 
-function isAbsoluteWindowsPath(includeTarget: string): boolean {
-  return /^[a-zA-Z]:[\\/]/.test(includeTarget) || /^\\\\[^\\]+\\[^\\]+/.test(includeTarget);
-}
-
-function getLibraryRoot(): string {
+function getLibraryRoots(): string[] {
   const cfg = vscode.workspace.getConfiguration("hsl");
-  const configured = cfg.get<string>("libraryRoot", DEFAULT_LIBRARY_ROOT);
-  return path.win32.normalize(configured);
+  const hamiltonDir = path.win32.normalize(
+    cfg.get<string>("hamiltonDir", DEFAULT_HAMILTON_DIR)
+  );
+  const configured = cfg.get<string[]>("libraryRoots", []);
+  const roots = configured.length > 0
+    ? configured
+    : [
+        path.win32.join(hamiltonDir, "Library"),
+        path.win32.join(hamiltonDir, "Methods"),
+        path.win32.join(hamiltonDir, "Methods", "Library Demo Methods"),
+        path.win32.join(hamiltonDir, "Bin"),
+      ];
+  return Array.from(new Set(roots.map((root) => path.win32.normalize(root))));
 }
 
 function toWindowsLike(input: string): string {
@@ -233,32 +229,32 @@ function sanitizeForParsing(text: string): string {
   return chars.join("");
 }
 
-function extractIncludeTargets(text: string, libraryRoot: string): ParsedInclude[] {
+function extractIncludeTargets(
+  text: string,
+  libraryRoots: string[],
+  includingFile?: string
+): ParsedInclude[] {
   const includes: ParsedInclude[] = [];
-  const pattern = /^\s*#include\s+"([^"]+)"/gm;
+  const pattern = /^\s*#include\s+(?:"([^"]+)"|__filename__\s*"([^"]*)")/gm;
   let m: RegExpExecArray | null;
   while ((m = pattern.exec(text)) !== null) {
-    const rawTarget = m[1].trim();
-    const resolvedPath = resolveIncludeTarget(rawTarget, libraryRoot);
+    const rawTarget = m[1]
+      ? m[1].trim()
+      : `${includingFile ? path.win32.basename(includingFile, path.win32.extname(includingFile)) : "__filename__"}${m[2] ?? ""}`;
+    const resolvedPath = resolveHslIncludeTarget(
+      rawTarget,
+      libraryRoots,
+      includingFile,
+      (candidate) => fs.existsSync(candidate)
+    );
     includes.push({
       rawTarget,
       isAbsolute: isAbsoluteWindowsPath(rawTarget),
       resolvedPath: resolvedPath ?? undefined,
+      lineIndex: text.slice(0, m.index).split(/\r?\n/).length - 1,
     });
   }
   return includes;
-}
-
-function resolveIncludeTarget(target: string, libraryRoot: string): string | null {
-  const winTarget = toWindowsLike(target);
-  const candidate = isAbsoluteWindowsPath(winTarget)
-    ? path.win32.normalize(winTarget)
-    : path.win32.normalize(path.win32.join(libraryRoot, winTarget));
-
-  if (fs.existsSync(candidate)) {
-    return candidate;
-  }
-  return null;
 }
 
 function splitArgs(paramList: string): string[] {
@@ -350,15 +346,21 @@ function extractDocComment(originalLines: string[], functionStartLine: number): 
   return "";
 }
 
-function toRelativeIncludePath(absoluteFile: string, libraryRoot: string): string {
-  const relative = path.win32.relative(path.win32.normalize(libraryRoot), path.win32.normalize(absoluteFile));
-  return toWindowsLike(relative);
+function toRelativeIncludePath(absoluteFile: string, libraryRoots: string[]): string {
+  const normalizedFile = path.win32.normalize(absoluteFile);
+  for (const root of libraryRoots) {
+    const relative = path.win32.relative(path.win32.normalize(root), normalizedFile);
+    if (relative !== "" && !relative.startsWith("..") && !path.win32.isAbsolute(relative)) {
+      return toWindowsLike(relative);
+    }
+  }
+  return normalizedFile;
 }
 
 function parseFunctionsAndNamespaces(
   text: string,
   filePath: string,
-  libraryRoot: string
+  libraryRoots: string[]
 ): HslFunctionSymbol[] {
   const sanitized = sanitizeForParsing(text);
   const originalLines = text.split(/\r?\n/);
@@ -416,7 +418,7 @@ function parseFunctionsAndNamespaces(
           const nsPrefix = namespaceStack.map((n) => n.name).join("::");
           const qualifiedName = nsPrefix.length > 0 ? `${nsPrefix}::${name}` : name;
           const docComment = extractDocComment(originalLines, functionStartLine);
-          const includeText = toRelativeIncludePath(filePath, libraryRoot);
+          const includeText = toRelativeIncludePath(filePath, libraryRoots);
 
           functions.push({
             name,
@@ -483,10 +485,10 @@ class HslIndexService {
   private readonly context: vscode.ExtensionContext;
   private readonly parseCache = new Map<string, FileParseResult>();
   private readonly globalSymbols: HslFunctionSymbol[] = [];
-  private globalByQualified = new Map<string, HslFunctionSymbol[]>();
   private readonly unresolvedIncludeCollection = vscode.languages.createDiagnosticCollection("hsl-includes");
-  private buildStarted = false;
   private buildComplete = false;
+  private buildPromise: Promise<void> | undefined;
+  private indexGeneration = 0;
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
@@ -566,7 +568,61 @@ class HslIndexService {
 
     context.subscriptions.push(provider, hoverProvider, signatureProvider);
 
-    void this.ensureGlobalIndex();
+    const includeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const scheduleIncludeDiagnostics = (document: vscode.TextDocument): void => {
+      const key = document.uri.toString();
+      const existing = includeTimers.get(key);
+      if (existing) {
+        clearTimeout(existing);
+      }
+      includeTimers.set(
+        key,
+        setTimeout(() => {
+          includeTimers.delete(key);
+          if (!document.isClosed) {
+            this.publishUnresolvedIncludeDiagnostics(document);
+          }
+        }, 150)
+      );
+    };
+    context.subscriptions.push(
+      vscode.workspace.onDidOpenTextDocument((document) => {
+        if (document.languageId === "hsl") {
+          scheduleIncludeDiagnostics(document);
+        }
+      }),
+      vscode.workspace.onDidChangeTextDocument((event) => {
+        if (event.document.languageId === "hsl") {
+          scheduleIncludeDiagnostics(event.document);
+        }
+      }),
+      vscode.workspace.onDidCloseTextDocument((document) => {
+        const key = document.uri.toString();
+        const timer = includeTimers.get(key);
+        if (timer) {
+          clearTimeout(timer);
+          includeTimers.delete(key);
+        }
+        this.unresolvedIncludeCollection.delete(document.uri);
+      }),
+      { dispose: () => includeTimers.forEach((timer) => clearTimeout(timer)) }
+    );
+
+    for (const root of getLibraryRoots()) {
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(root, "**/*.{hsl,hs_,hsi}")
+      );
+      const invalidate = (): void => this.invalidateGlobalIndex();
+      watcher.onDidCreate(invalidate, undefined, context.subscriptions);
+      watcher.onDidChange(invalidate, undefined, context.subscriptions);
+      watcher.onDidDelete(invalidate, undefined, context.subscriptions);
+      context.subscriptions.push(watcher);
+    }
+
+    void this.ensureGlobalIndex().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`HSL global index failed: ${message}`);
+    });
   }
 
   public async getVisibleSymbolContext(document: vscode.TextDocument): Promise<VisibleSymbolContext> {
@@ -594,8 +650,10 @@ class HslIndexService {
         continue;
       }
       visibleFiles.add(normalized);
+      const isCurrentDocument =
+        normalized === normalizeWindowsPath(document.uri.fsPath);
       for (const fn of parsed.functions) {
-        if (!fn.isPrivate) {
+        if (!fn.isPrivate || isCurrentDocument) {
           symbols.push(fn);
         }
       }
@@ -676,7 +734,7 @@ class HslIndexService {
   }
 
   private readDocumentIncludes(document: vscode.TextDocument): ParsedInclude[] {
-    return extractIncludeTargets(document.getText(), getLibraryRoot());
+    return extractIncludeTargets(document.getText(), getLibraryRoots(), document.uri.fsPath);
   }
 
   private getIncludeInsertionEdit(document: vscode.TextDocument, absoluteIncludeFile: string): vscode.TextEdit | null {
@@ -690,8 +748,10 @@ class HslIndexService {
     }
 
     const style = this.chooseIncludeStyle(document);
-    const libraryRoot = getLibraryRoot();
-    const includeText = style === "absolute" ? path.win32.normalize(absoluteIncludeFile) : toRelativeIncludePath(absoluteIncludeFile, libraryRoot);
+    const libraryRoots = getLibraryRoots();
+    const includeText = style === "absolute"
+      ? path.win32.normalize(absoluteIncludeFile)
+      : toRelativeIncludePath(absoluteIncludeFile, libraryRoots);
     const includeLine = `#include "${includeText}"`;
     const insertLine = this.findIncludeInsertLine(document);
     const eol = document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
@@ -878,17 +938,44 @@ class HslIndexService {
     return { name, activeParameter, isMethod };
   }
 
-  private async ensureGlobalIndex(): Promise<void> {
-    if (this.buildComplete || this.buildStarted) {
+  private ensureGlobalIndex(): Promise<void> {
+    if (this.buildComplete) {
+      return Promise.resolve();
+    }
+    if (this.buildPromise) {
+      return this.buildPromise;
+    }
+    this.buildPromise = this.buildGlobalIndex().finally(() => {
+      this.buildPromise = undefined;
+    });
+    return this.buildPromise;
+  }
+
+  private invalidateGlobalIndex(): void {
+    this.indexGeneration++;
+    this.buildComplete = false;
+    this.parseCache.clear();
+    this.globalSymbols.length = 0;
+    const rebuild = this.buildPromise
+      ? this.buildPromise.catch(() => undefined).then(() => this.ensureGlobalIndex())
+      : this.ensureGlobalIndex();
+    void rebuild.catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`HSL global index rebuild failed: ${message}`);
+    });
+  }
+
+  private async buildGlobalIndex(): Promise<void> {
+    if (this.buildComplete) {
       return;
     }
-    this.buildStarted = true;
 
-    const libraryRoot = getLibraryRoot();
+    const generation = this.indexGeneration;
+    const libraryRoots = getLibraryRoots();
     await fs.promises.mkdir(this.context.globalStorageUri.fsPath, { recursive: true });
 
     const cachePath = path.join(this.context.globalStorageUri.fsPath, INDEX_CACHE_FILE);
-    const cache = await this.readGlobalCache(cachePath, libraryRoot);
+    const cache = await this.readGlobalCache(cachePath, libraryRoots);
     const cacheByPath = new Map<string, CacheFileRecord>();
     for (const record of cache?.records ?? []) {
       cacheByPath.set(normalizeWindowsPath(record.filePath), record);
@@ -896,7 +983,14 @@ class HslIndexService {
 
     const newRecords: CacheFileRecord[] = [];
 
-    for await (const hslFile of walkHslFiles(libraryRoot)) {
+    const indexedPaths = new Set<string>();
+    for (const libraryRoot of libraryRoots) {
+      for await (const hslFile of walkHslFiles(libraryRoot)) {
+      const normalizedFile = normalizeWindowsPath(hslFile);
+      if (indexedPaths.has(normalizedFile)) {
+        continue;
+      }
+      indexedPaths.add(normalizedFile);
       let stat: fs.Stats;
       try {
         stat = await fs.promises.stat(hslFile);
@@ -918,18 +1012,20 @@ class HslIndexService {
         continue;
       }
 
-      const includes = extractIncludeTargets(text, libraryRoot);
-      const functions = parseFunctionsAndNamespaces(text, hslFile, libraryRoot);
+      const includes = extractIncludeTargets(text, libraryRoots, hslFile);
+      const functions = parseFunctionsAndNamespaces(text, hslFile, libraryRoots);
       newRecords.push({
         filePath: path.win32.normalize(hslFile),
         mtimeMs: stat.mtimeMs,
         includes,
         functions,
       });
+      }
     }
 
     const cacheToWrite: GlobalCacheFile = {
-      libraryRoot,
+      version: 2,
+      libraryRoots,
       createdAt: Date.now(),
       records: newRecords,
     };
@@ -940,8 +1036,11 @@ class HslIndexService {
       // cache write is best-effort only
     }
 
+    if (generation !== this.indexGeneration) {
+      return;
+    }
+
     this.globalSymbols.length = 0;
-    this.globalByQualified = new Map<string, HslFunctionSymbol[]>();
 
     for (const record of newRecords) {
       const parsed: FileParseResult = {
@@ -957,20 +1056,24 @@ class HslIndexService {
           continue;
         }
         this.globalSymbols.push(fn);
-        const existing = this.globalByQualified.get(fn.qualifiedName) ?? [];
-        existing.push(fn);
-        this.globalByQualified.set(fn.qualifiedName, existing);
       }
     }
 
-    this.buildComplete = true;
+    if (generation === this.indexGeneration) {
+      this.buildComplete = true;
+    }
   }
 
-  private async readGlobalCache(cachePath: string, libraryRoot: string): Promise<GlobalCacheFile | null> {
+  private async readGlobalCache(cachePath: string, libraryRoots: string[]): Promise<GlobalCacheFile | null> {
     try {
       const raw = await fs.promises.readFile(cachePath, "utf8");
       const parsed = JSON.parse(raw) as GlobalCacheFile;
-      if (normalizeWindowsPath(parsed.libraryRoot) !== normalizeWindowsPath(libraryRoot)) {
+      if (parsed.version !== 2 || !Array.isArray(parsed.libraryRoots)) {
+        return null;
+      }
+      const cachedRoots = parsed.libraryRoots.map(normalizeWindowsPath).sort();
+      const currentRoots = libraryRoots.map(normalizeWindowsPath).sort();
+      if (JSON.stringify(cachedRoots) !== JSON.stringify(currentRoots)) {
         return null;
       }
       return parsed;
@@ -1009,9 +1112,9 @@ class HslIndexService {
       return null;
     }
 
-    const libraryRoot = getLibraryRoot();
-    const includes = extractIncludeTargets(text, libraryRoot);
-    const functions = parseFunctionsAndNamespaces(text, filePath, libraryRoot);
+    const libraryRoots = getLibraryRoots();
+    const includes = extractIncludeTargets(text, libraryRoots, filePath);
+    const functions = parseFunctionsAndNamespaces(text, filePath, libraryRoots);
 
     let mtimeMs = Date.now();
     if (!inlineText) {
@@ -1043,22 +1146,17 @@ class HslIndexService {
         return;
       }
 
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const marker = `#include \"${inc.rawTarget}\"`;
-        const idx = line.indexOf(marker);
-        if (idx >= 0) {
-          const range = new vscode.Range(i, idx, i, idx + marker.length);
-          const diagnostic = new vscode.Diagnostic(
-            range,
-            `Unable to resolve include target \"${inc.rawTarget}\" from library root \"${getLibraryRoot()}\".`,
-            vscode.DiagnosticSeverity.Warning
-          );
-          diagnostic.source = "hsl-intellisense";
-          diagnostics.push(diagnostic);
-          break;
-        }
-      }
+      const lineIndex = Math.min(Math.max(inc.lineIndex, 0), lines.length - 1);
+      const line = lines[lineIndex] ?? "";
+      const idx = Math.max(0, line.indexOf("#include"));
+      const range = new vscode.Range(lineIndex, idx, lineIndex, line.length);
+      const diagnostic = new vscode.Diagnostic(
+        range,
+        `Unable to resolve include target \"${inc.rawTarget}\" from the current file or configured HSL roots: ${getLibraryRoots().join(", ")}.`,
+        vscode.DiagnosticSeverity.Warning
+      );
+      diagnostic.source = "hsl-intellisense";
+      diagnostics.push(diagnostic);
     });
 
     this.unresolvedIncludeCollection.set(document.uri, diagnostics);

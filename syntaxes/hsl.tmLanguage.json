@@ -62,7 +62,7 @@
         },
         {
           "name": "keyword.control.hsl",
-          "match": "\\b(if|else|for|while|break|return|goto|abort|resume|loop|next|pause|onerror|lock|unlock|exit|quit)\\b"
+          "match": "\\b(if|else|for|while|break|return|goto|abort|resume|loop|next|pause|onerror|fork|join|lock|unlock)\\b"
         },
         {
           "name": "storage.type.hsl",

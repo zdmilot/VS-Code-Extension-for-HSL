@@ -20,6 +20,7 @@ import argparse
 import time
 import uuid
 import winreg
+import tempfile
 from datetime import datetime
 
 # Force unbuffered stdout/stderr so output streams in real time
@@ -56,12 +57,14 @@ def main():
                         help="Print preprocessed source instead of parsing")
     parser.add_argument("--max-iterations", type=int, default=100000,
                         help="Maximum loop iterations (safety limit)")
+    parser.add_argument("--strict", action="store_true",
+                        help="Reject missing includes, parser recovery, unsupported constructs, and unknown calls")
     parser.add_argument("--hamilton-dir", type=str,
                         default=r"C:\Program Files (x86)\Hamilton",
                         help="Hamilton installation directory")
     parser.add_argument("--log-dir", type=str,
                         default=None,
-                        help="Directory for trace log file output (default: <hamilton-dir>/Logfiles/vscode)")
+                        help="Directory for trace logs (default: per-user local application data)")
 
     args = parser.parse_args()
 
@@ -84,7 +87,7 @@ def main():
     print("[1/4] Preprocessing...")
     t0 = time.time()
     try:
-        preprocessor = Preprocessor(hamilton_dir=args.hamilton_dir)
+        preprocessor = Preprocessor(hamilton_dir=args.hamilton_dir, strict=args.strict)
         source = preprocessor.preprocess_file(hsl_path)
         t1 = time.time()
         print(f"  Done ({t1 - t0:.3f}s)")
@@ -131,7 +134,7 @@ def main():
     print("[3/4] Parsing...")
     t0 = time.time()
     try:
-        p = Parser(tokens, filename=hsl_path)
+        p = Parser(tokens, filename=hsl_path, strict=args.strict)
         program = p.parse()
         t1 = time.time()
         print(f"  Done ({t1 - t0:.3f}s)")
@@ -160,7 +163,9 @@ def main():
     run_id = uuid.uuid4().hex
     try:
         trace = TraceOutput(verbose=verbose)
-        interp = Interpreter(trace=trace)
+        interp = Interpreter(
+            trace=trace, strict=args.strict, hamilton_dir=args.hamilton_dir
+        )
         interp._max_iterations = args.max_iterations
         interp.execute(program)
         t1 = time.time()
@@ -177,7 +182,10 @@ def main():
         return 1
 
     # === Write trace log file ===
-    log_dir = args.log_dir or os.path.join(args.hamilton_dir, "Logfiles", "vscode")
+    local_data = os.getenv("LOCALAPPDATA") or tempfile.gettempdir()
+    log_dir = args.log_dir or os.path.join(
+        local_data, "HSL Language Support", "Simulator Logs"
+    )
     method_name = os.path.splitext(os.path.basename(hsl_path))[0]
     log_filename = f"{method_name}_{run_id}_Trace.trc"
     try:

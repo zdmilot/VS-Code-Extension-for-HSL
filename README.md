@@ -43,10 +43,11 @@ In HSL, local variables must be declared at the beginning of a **code block** (`
 - Declarations are valid at the top of that nested block, even if they appear later in the outer function.
 - Declarations after executable statements in the **same** block are invalid.
 
-### Automatic Checksum Generation
-When you save an HSL file, the extension automatically updates the Hamilton file validation checksum. This uses the Hamilton `HxSecurityCom` COM object to call `SetFileValidation`, so there is no need to manually fix checksums after editing -- files are always kept in a valid state for the VENUS runtime.
+### Optional Hamilton Checksum Generation
+The extension works without Hamilton VENUS, Run Control, COM registration, Python, or a separate simulator install. If a file will later run in VENUS, you can opt in to `hsl.updateChecksumOnSave`; that optional feature uses Hamilton's `HxSecurityCom` COM object to update file validation.
 
-> **Note:** Requires Hamilton VENUS installed to have access to the COM Objects needed to generate the checksum.
+### Offline Method Simulation
+Use **HSL: Simulate HSL Method (Offline)** to execute a text source method containing `method main()` without connecting to Hamilton hardware. This is a simulator, not an interactive breakpoint debugger. Binary `.med` files and library-only `.hs_`/`.hsi` files are not simulation targets; test libraries through a small source-method harness.
 
 ### Code Snippets
 Pre-built templates for common HSL patterns -- type a prefix and press `Tab`:
@@ -78,13 +79,14 @@ Pre-built templates for common HSL patterns -- type a prefix and press `Tab`:
 |-----------|-------------|
 | `.hsl` | HSL source file (commonly used for declarations and/or headers, depending on library structure) |
 | `.hs_` | HSL source file (commonly used for implementation/source, depending on library structure) |
+| `.hsi` | HSL include/interface source file |
 | `.sub` | HSL submethod file |
 
 ---
 
 ## Library Discovery and Search Paths
 
-This extension mirrors the standard HSL/VENUS library discovery model. Because library locations are governed by the Hamilton installation and HSL runtime conventions, **the extension does not provide a setting to change library roots**.
+This extension mirrors the standard HSL/VENUS library discovery model. It checks the including file's directory first, followed by the standard `Library`, `Methods`, demo-method, and `Bin` directories beneath the configured Hamilton installation.
 
 The extension discovers HSL libraries using the typical Hamilton installation library locations, such as:
 
@@ -95,6 +97,8 @@ It also resolves `#include "..."` directives commonly used in HSL libraries, inc
 - UNC paths
 - Library-root-relative includes under the Hamilton library directory
 
+Use `hsl.hamiltonDir` to select a non-default Hamilton installation, or `hsl.libraryRoots` to provide an explicit ordered list of include roots.
+
 > Note: IntelliSense for library functions depends on the libraries being present on the machine where VS Code is running.
 
 ---
@@ -102,15 +106,15 @@ It also resolves `#include "..."` directives commonly used in HSL libraries, inc
 ## Language Reference
 
 ### Keywords
-- **Control Flow**: `if`, `else`, `for`, `while`, `do`, `loop`, `switch`, `case`, `default`, `break`, `continue`, `return`
-- **Exception Handling**: `onerror`, `goto`, `abort`, `throw`, `try`, `catch`
-- **Declarations**: `namespace`, `function`, `method`, `dialog`, `class`, `struct`
-- **Modifiers**: `private`, `public`, `protected`, `static`, `const`, `global`, `synchronized`
+- **Control Flow**: `if`, `else`, `for`, `while`, `loop`, `break`, `return`, `abort`, `pause`
+- **Error Handling**: `onerror goto`, `onerror resume next`, `resume next`, `err.Raise`
+- **Declarations**: `namespace`, `function`, `method`, `dialog`, `workflow`, `struct`
+- **Modifiers**: `private`, `static`, `const`, `global`, `synchronized`
 - **Parallel Execution**: `fork`, `join`, `lock`, `unlock`
 - **HSL Scheduler**: `activity`, `actionblock`, `executoronly`, `oncancelaction`, `oncanceltask`, `resource`, `reschedule`, `schedule`, `scheduleronly`, `schedulerprompt`, `workflow`
 
 ### Data Types
-- **Primitives**: `variable`, `string`, `integer`, `float`, `char`, `short`, `long`
+- **Primitives**: `variable`, `string`, `float`, `char`, `short`, `long`
 - **Objects**: `object`, `sequence`, `device`, `resource`, `dialog`, `timer`, `event`, `file`
 - **Constants**: `hslTrue`, `hslFalse`
 
@@ -137,9 +141,8 @@ The extension provides auto-completion for 100+ built-in HSL functions, includin
 ## Requirements
 
 - VS Code 1.85.0 or later
-- Hamilton VENUS 4 or later
 
-You can download and install Hamilton VENUS 4 from [Hamilton's official post on the forum](https://labautomation.io/t/download-hamilton-method-manager-2/727), or download it directly [here](https://download.hamiltonsupport.com/wl/?id=7kDYflsz630Vp9uLwYjGvCVb4Gp0i8sG).
+Hamilton VENUS is optional. Install it only if you want local Hamilton library indexing, checksum generation, **Open in Hamilton HSL Editor**, or real execution through HxRun. Syntax highlighting, diagnostics, IntelliSense, the method overview, and the bundled offline simulator work without it.
 
 ---
 
@@ -157,9 +160,9 @@ You can download and install Hamilton VENUS 4 from [Hamilton's official post on 
 
 - This extension is not a full HSL compiler; parsing and analysis are heuristic and best-effort.
 - Diagnostics may not perfectly match every VENUS translator edge case.
-- Some IntelliSense and discovery features depend on HSL libraries being installed locally in expected system paths.
+- Symbols from Hamilton's proprietary libraries are indexed only when those libraries are installed or configured; the built-in HSL language data remains available offline.
 - Initial indexing/discovery may take longer on first run; subsequent runs are typically faster due to caching.
-- There is currently no debugger or Run Control integration in VS Code; programs must be executed using Hamilton Run Control (`HxRun.exe`).
+- Run Without Debugging integrates with Hamilton `HxRun.exe`; offline simulation is also available. Interactive breakpoints, stepping, stack frames, and variable inspection are not yet implemented.
 
 ---
 

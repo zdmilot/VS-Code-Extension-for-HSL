@@ -18,11 +18,11 @@ More broadly, **all non-ASCII characters** (smart quotes, arrows, non-breaking s
 
 The VS Code extension enforces this rule with diagnostic code `non-ascii-character`. Any character outside printable ASCII (`0x20`-`0x7E`), tab, carriage return, or line feed is flagged as an error -- even inside comments and strings, because VENUS processes the raw bytes before parsing.
 
-### Auto-Replacement on Save
+### Optional Replacement on Save
 
-When an HSL file is saved, the extension automatically replaces known non-ASCII characters with their ASCII equivalents **before** the checksum is applied. Any remaining non-ASCII characters that have no known mapping are stripped entirely. The diagnostic warnings remain active during editing so you can see problematic characters before saving.
+When `hsl.autoSanitizeNonAscii` is explicitly enabled, saving replaces known non-ASCII characters with ASCII equivalents. Any remaining characters without a mapping are stripped. The setting is disabled by default because it changes source text; diagnostics remain active either way.
 
-The following replacements are performed automatically:
+The following replacements are performed when the setting is enabled:
 
 | Non-ASCII Character | Replacement | Description |
 |---|---|---|
@@ -760,7 +760,7 @@ if (numValue > 0) { ... }    // OK
 
 ### No `continue` Keyword
 
-HSL does **not** support the `continue` keyword in loops. Use conditional logic instead:
+HSL does **not** support a loop-continuation statement. Both C/C++ `continue;` and a standalone `next;` are invalid. `next` is reserved for the error-handling forms `resume next;` and `onerror resume next;`. Restructure the loop body with a condition or control flag:
 
 ```hsl
 // WRONG
@@ -771,7 +771,7 @@ while(i < 10)
    Trace(IStr(i));
 }
 
-// CORRECT
+// CORRECT -- guard the portion that should be skipped
 while(i < 10)
 {
    i = i + 1;
@@ -909,7 +909,7 @@ function MyFunc(variable i_param) variable
 
 ## HSL Debugger -- Simulation Runtime
 
-This workspace includes a **Python-based HSL simulation runtime** at `HSL Debugger/hsl_runtime/`. It preprocesses, tokenizes, parses, and interprets HSL source code entirely in Python -- no Hamilton hardware or VENUS installation is required (only the Hamilton library `.hsl`/`.sub` files are needed for `#include` resolution).
+This workspace includes a **Python-based HSL simulation runtime** at `HSL Debugger/hsl_runtime/`. End users run its bundled executable, so Python, Hamilton hardware, VENUS, and Run Control are not required. Source files that include Hamilton's proprietary libraries still need those particular library files or an offline test harness that does not include them.
 
 The debugger **requires `method main()`** in the target file. Library files without `method main()` will emit `"No main() method found"` and not execute. To test a library, create a test harness (see "Creating Test Harnesses" below).
 
@@ -1028,7 +1028,7 @@ python -m hsl_runtime.main "<absolute-path-to-file.hsl>" --hamilton-dir "C:\Prog
 | `--dump-preprocessed` | Print preprocessed source and exit (no execution) |
 | `--max-iterations N` | Loop safety limit (default: 100,000) |
 | `--hamilton-dir PATH` | Hamilton installation directory (default: `C:\Program Files (x86)\Hamilton`) |
-| `--log-dir PATH` | `.trc` trace log output directory (default: `<hamilton-dir>/Logfiles/vscode`) |
+| `--log-dir PATH` | `.trc` trace log output directory (default: per-user local application data) |
 
 **4. Check the exit code and output.**
 - **Exit code 0** = success. Look for `Simulation finished successfully`.

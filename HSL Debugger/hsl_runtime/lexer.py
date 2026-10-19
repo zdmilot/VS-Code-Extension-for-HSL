@@ -46,6 +46,7 @@ class TokenType(Enum):
     STATIC = auto()
     GLOBAL = auto()
     CONST = auto()
+    SYNCHRONIZED = auto()
     IF = auto()
     ELSE = auto()
     FOR = auto()
@@ -62,6 +63,11 @@ class TokenType(Enum):
     EXECUTORONLY = auto()
     LOOP = auto()
     STRUCT = auto()
+    LOCK = auto()
+    UNLOCK = auto()
+    WORKFLOW = auto()
+    ACTIVITY = auto()
+    ACTIONBLOCK = auto()
 
     # Operators
     PLUS = auto()          # +
@@ -135,6 +141,7 @@ KEYWORDS = {
     'static': TokenType.STATIC,
     'global': TokenType.GLOBAL,
     'const': TokenType.CONST,
+    'synchronized': TokenType.SYNCHRONIZED,
     'if': TokenType.IF,
     'else': TokenType.ELSE,
     'for': TokenType.FOR,
@@ -151,6 +158,11 @@ KEYWORDS = {
     'executoronly': TokenType.EXECUTORONLY,
     'loop': TokenType.LOOP,
     'struct': TokenType.STRUCT,
+    'lock': TokenType.LOCK,
+    'unlock': TokenType.UNLOCK,
+    'workflow': TokenType.WORKFLOW,
+    'activity': TokenType.ACTIVITY,
+    'actionblock': TokenType.ACTIONBLOCK,
 }
 
 

@@ -125,11 +125,21 @@ class Parser:
         from a single pass.
     """
 
-    def __init__(self, tokens: list[Token], filename: str = "<string>"):
-        self.tokens = tokens
+    def __init__(self, tokens: list[Token], filename: str = "<string>", strict: bool = False):
+        # Comments and Method Editor metadata are lexed for tooling, but they
+        # are grammatically insignificant and may appear between any tokens.
+        self.tokens = [
+            token for token in tokens
+            if token.type not in (
+                TokenType.COMMENT,
+                TokenType.EDITOR_MARKER,
+                TokenType.CHECKSUM,
+            )
+        ]
         self.filename = filename
         self.pos = 0
         self.errors: list[ParseError] = []
+        self.strict = strict
 
     # ========================================================================
     # Token stream navigation
@@ -193,6 +203,8 @@ class Parser:
         ParseError
             If the current token does not match.
         """
+        if token_type not in (TokenType.COMMENT, TokenType.EDITOR_MARKER, TokenType.CHECKSUM):
+            self.skip_comments_and_markers()
         token = self.current()
         if token.type != token_type:
             raise ParseError(
@@ -224,6 +236,8 @@ class Parser:
         Token | None
             The consumed token on match, otherwise ``None``.
         """
+        if token_type not in (TokenType.COMMENT, TokenType.EDITOR_MARKER, TokenType.CHECKSUM):
+            self.skip_comments_and_markers()
         token = self.current()
         if token.type == token_type:
             if value is None or token.value == value:
@@ -301,6 +315,8 @@ class Parser:
                     program.declarations.append(decl)
             except ParseError as e:
                 self.errors.append(e)
+                if self.strict:
+                    raise
                 # Error recovery: skip to next semicolon or close brace
                 self._recover()
 
@@ -401,7 +417,8 @@ class Parser:
             return self.parse_namespace()
 
         # Function/method with qualifiers
-        if tok.type in (TokenType.PRIVATE, TokenType.STATIC, TokenType.GLOBAL):
+        if tok.type in (TokenType.PRIVATE, TokenType.STATIC, TokenType.GLOBAL,
+                        TokenType.SYNCHRONIZED):
             return self.parse_qualified_declaration()
 
         # Function declaration
@@ -411,6 +428,9 @@ class Parser:
         # Method declaration (entry point)
         if tok.type == TokenType.METHOD:
             return self.parse_function_declaration(is_method=True)
+
+        if tok.type == TokenType.WORKFLOW:
+            return self.parse_function_declaration(is_workflow=True)
 
         # Variable declaration
         if tok.type in (TokenType.VARIABLE, TokenType.STRING_TYPE, TokenType.SEQUENCE,
@@ -433,6 +453,8 @@ class Parser:
 
         # struct declaration (skip gracefully)
         if tok.type == TokenType.STRUCT:
+            if self.strict:
+                raise ParseError("struct values are not implemented by the simulator", tok)
             return self._skip_struct_declaration()
 
         # Bare statement at top level (includes assignments, function calls)
@@ -458,7 +480,7 @@ class Parser:
         """
         tok = self.expect(TokenType.NAMESPACE)
         name_tok = self.expect(TokenType.IDENTIFIER)
-        body = self.parse_block()
+        body = self.parse_block(enforce_declaration_order=False)
         return NamespaceDeclaration(
             name=name_tok.value, body=body,
             line=tok.line, column=tok.column, file=tok.file
@@ -502,6 +524,7 @@ class Parser:
             if isinstance(decl, FunctionDeclaration):
                 decl.is_private = qualifiers.get('private', False)
                 decl.is_static = qualifiers.get('static', False)
+                decl.is_synchronized = qualifiers.get('synchronized', False)
             return decl
 
         if tok.type == TokenType.METHOD:
@@ -542,9 +565,11 @@ class Parser:
             Keys ``'private'``, ``'static'``, ``'global'``, ``'const'`` -
             each ``True`` if the corresponding keyword was present.
         """
-        quals = {'private': False, 'static': False, 'global': False, 'const': False}
+        quals = {'private': False, 'static': False, 'global': False,
+                 'const': False, 'synchronized': False}
         while self.current().type in (TokenType.PRIVATE, TokenType.STATIC,
-                                       TokenType.GLOBAL, TokenType.CONST):
+                                       TokenType.GLOBAL, TokenType.CONST,
+                                       TokenType.SYNCHRONIZED):
             tok = self.advance()
             quals[tok.value] = True
         return quals
@@ -606,23 +631,26 @@ class Parser:
             is_array = False
             initializer = None
             device_args = []
+            constructor_args = []
 
             # Array declaration: variable name[]
             if self.match(TokenType.LBRACKET):
                 is_array = True
                 self.expect(TokenType.RBRACKET)
 
-            # Constructor initialization: variable name(value)
-            if var_type == 'device' and self.current().type == TokenType.LPAREN:
+            # Constructor initialization. Resource and device declarations
+            # commonly use multiple arguments; scalar types normally use one.
+            if self.current().type == TokenType.LPAREN:
                 self.advance()
                 while self.current().type != TokenType.RPAREN and not self.at_end():
-                    device_args.append(self.parse_expression())
+                    constructor_args.append(self.parse_expression())
                     if not self.match(TokenType.COMMA):
                         break
                 self.expect(TokenType.RPAREN)
-            elif self.match(TokenType.LPAREN):
-                initializer = self.parse_expression()
-                self.expect(TokenType.RPAREN)
+                if var_type == 'device':
+                    device_args = constructor_args
+                elif len(constructor_args) == 1:
+                    initializer = constructor_args[0]
             elif self.match(TokenType.ASSIGN):
                 initializer = self.parse_expression()
 
@@ -634,11 +662,15 @@ class Parser:
                 is_global=qualifiers.get('global', False),
                 is_const=qualifiers.get('const', False),
                 device_args=device_args,
+                constructor_args=constructor_args,
                 line=tok.line, column=tok.column, file=tok.file
             )
             declarations.append(decl)
 
-        self.match(TokenType.SEMICOLON)
+        if self.strict:
+            self.expect(TokenType.SEMICOLON)
+        else:
+            self.match(TokenType.SEMICOLON)
 
         if len(declarations) == 1:
             return declarations[0]
@@ -659,7 +691,8 @@ class Parser:
     # The ``method`` keyword marks the function as a VENUS entry point.
     # ========================================================================
 
-    def parse_function_declaration(self, is_method: bool = False) -> FunctionDeclaration:
+    def parse_function_declaration(self, is_method: bool = False,
+                                   is_workflow: bool = False) -> FunctionDeclaration:
         """Parse a function or method declaration (with optional body).
 
         Parameters
@@ -677,7 +710,10 @@ class Parser:
         tok = self.advance()  # consume 'function' or 'method'
 
         name_tok = self.expect(TokenType.IDENTIFIER)
-        name = name_tok.value
+        name_parts = [name_tok.value]
+        while self.match(TokenType.SCOPE):
+            name_parts.append(self.expect(TokenType.IDENTIFIER).value)
+        name = "::".join(name_parts)
 
         # Parameters
         self.expect(TokenType.LPAREN)
@@ -691,8 +727,14 @@ class Parser:
 
         # Return type
         return_type = "void"
-        if self.current().type in (TokenType.VARIABLE, TokenType.STRING_TYPE,
-                                    TokenType.VOID, TokenType.IDENTIFIER):
+        if self.current().type in (
+            TokenType.VARIABLE, TokenType.STRING_TYPE, TokenType.SEQUENCE,
+            TokenType.DEVICE, TokenType.FILE_TYPE, TokenType.OBJECT,
+            TokenType.TIMER, TokenType.EVENT, TokenType.DIALOG,
+            TokenType.RESOURCE, TokenType.CHAR_TYPE, TokenType.SHORT_TYPE,
+            TokenType.LONG_TYPE, TokenType.FLOAT_TYPE, TokenType.VOID,
+            TokenType.IDENTIFIER,
+        ):
             return_type = self.advance().value
             # Handle array return type: variable[]
             if self.current().type == TokenType.LBRACKET:
@@ -711,7 +753,7 @@ class Parser:
 
         return FunctionDeclaration(
             name=name, parameters=params, return_type=return_type,
-            body=body, is_method=is_method,
+            body=body, is_method=is_method, is_workflow=is_workflow,
             line=tok.line, column=tok.column, file=tok.file
         )
 
@@ -768,7 +810,7 @@ class Parser:
     # declarations may also appear inside blocks.
     # ========================================================================
 
-    def parse_block(self) -> Block:
+    def parse_block(self, enforce_declaration_order: bool = True) -> Block:
         """Parse a brace-enclosed block of statements.
 
         Grammar::
@@ -785,17 +827,38 @@ class Parser:
         """
         tok = self.expect(TokenType.LBRACE)
         stmts = []
+        seen_executable = False
 
         while self.current().type != TokenType.RBRACE and not self.at_end():
             self.skip_comments_and_markers()
             if self.current().type == TokenType.RBRACE or self.at_end():
                 break
             try:
+                statement_token = self.current()
                 stmt = self.parse_statement()
                 if stmt is not None:
+                    is_variable_declaration = isinstance(stmt, VariableDeclaration) or (
+                        isinstance(stmt, Block)
+                        and bool(stmt.statements)
+                        and all(isinstance(item, VariableDeclaration) for item in stmt.statements)
+                    )
+                    if (
+                        self.strict
+                        and enforce_declaration_order
+                        and is_variable_declaration
+                        and seen_executable
+                    ):
+                        raise ParseError(
+                            "Variable declarations must appear before executable statements in the same block",
+                            statement_token,
+                        )
+                    if not is_variable_declaration:
+                        seen_executable = True
                     stmts.append(stmt)
             except ParseError as e:
                 self.errors.append(e)
+                if self.strict:
+                    raise
                 self._recover_in_block()
 
         self.expect(TokenType.RBRACE)
@@ -864,7 +927,8 @@ class Parser:
             return self.parse_variable_declaration()
 
         # Qualified declarations inside functions
-        if tok.type in (TokenType.PRIVATE, TokenType.STATIC, TokenType.GLOBAL):
+        if tok.type in (TokenType.PRIVATE, TokenType.STATIC, TokenType.GLOBAL,
+                        TokenType.SYNCHRONIZED):
             return self.parse_qualified_declaration()
 
         # const
@@ -883,6 +947,9 @@ class Parser:
         if tok.type == TokenType.METHOD:
             return self.parse_function_declaration(is_method=True)
 
+        if tok.type == TokenType.WORKFLOW:
+            return self.parse_function_declaration(is_workflow=True)
+
         # Control flow
         if tok.type == TokenType.IF:
             return self.parse_if()
@@ -894,18 +961,35 @@ class Parser:
             return self.parse_loop()
         if tok.type == TokenType.BREAK:
             self.advance()
-            self.match(TokenType.SEMICOLON)
+            if self.strict:
+                self.expect(TokenType.SEMICOLON)
+            else:
+                self.match(TokenType.SEMICOLON)
             return BreakStatement(line=tok.line, column=tok.column)
         if tok.type == TokenType.RETURN:
             return self.parse_return()
         if tok.type == TokenType.ABORT:
             self.advance()
-            self.match(TokenType.SEMICOLON)
+            if self.strict:
+                self.expect(TokenType.SEMICOLON)
+            else:
+                self.match(TokenType.SEMICOLON)
             return AbortStatement(line=tok.line, column=tok.column)
         if tok.type == TokenType.PAUSE:
             self.advance()
-            self.match(TokenType.SEMICOLON)
+            if self.strict:
+                self.expect(TokenType.SEMICOLON)
+            else:
+                self.match(TokenType.SEMICOLON)
             return PauseStatement(line=tok.line, column=tok.column)
+        if tok.type == TokenType.LOCK:
+            self.advance()
+            self.expect(TokenType.SEMICOLON)
+            return LockStatement(line=tok.line, column=tok.column)
+        if tok.type == TokenType.UNLOCK:
+            self.advance()
+            self.expect(TokenType.SEMICOLON)
+            return UnlockStatement(line=tok.line, column=tok.column)
 
         # Error handling
         if tok.type == TokenType.ONERROR:
@@ -913,7 +997,10 @@ class Parser:
         if tok.type == TokenType.RESUME:
             self.advance()
             self.expect(TokenType.NEXT)
-            self.match(TokenType.SEMICOLON)
+            if self.strict:
+                self.expect(TokenType.SEMICOLON)
+            else:
+                self.match(TokenType.SEMICOLON)
             return ResumeNext(line=tok.line, column=tok.column)
 
         # scheduleronly / executoronly
@@ -925,9 +1012,13 @@ class Parser:
             self.advance()
             body = self.parse_block()
             return ExecutorOnlyBlock(body=body, line=tok.line, column=tok.column)
+        if tok.type in (TokenType.ACTIVITY, TokenType.ACTIONBLOCK):
+            return self.parse_scheduler_block()
 
         # struct - skip the entire struct declaration gracefully
         if tok.type == TokenType.STRUCT:
+            if self.strict:
+                raise ParseError("struct values are not implemented by the simulator", tok)
             return self._skip_struct_declaration()
 
         # loop(N) { body }
@@ -937,13 +1028,14 @@ class Parser:
         # Runtime include: << "file.hsl"
         if tok.type == TokenType.LSHIFT:
             self.advance()
-            if self.current().type == TokenType.STRING:
-                path = self.advance().value
+            source = self.parse_expression()
+            if self.strict:
+                self.expect(TokenType.SEMICOLON)
+            else:
                 self.match(TokenType.SEMICOLON)
-                # In simulation, just skip runtime includes
-                return None
-            self.match(TokenType.SEMICOLON)
-            return None
+            return RuntimeExecute(
+                source=source, line=tok.line, column=tok.column, file=tok.file
+            )
 
         # Backslash (line continuation or path separator) - skip
         if tok.type == TokenType.BACKSLASH:
@@ -1147,10 +1239,13 @@ class Parser:
             self.expect(TokenType.RPAREN)
         elif self.current().type not in (TokenType.SEMICOLON, TokenType.RBRACE, TokenType.EOF):
             value = self.parse_expression()
-        self.match(TokenType.SEMICOLON)
+        if self.strict:
+            self.expect(TokenType.SEMICOLON)
+        else:
+            self.match(TokenType.SEMICOLON)
         return ReturnStatement(value=value, line=tok.line, column=tok.column)
 
-    def parse_onerror(self) -> OnErrorGoto:
+    def parse_onerror(self) -> ASTNode:
         """Parse an ``onerror goto`` statement.
 
         Grammar::
@@ -1165,14 +1260,38 @@ class Parser:
         OnErrorGoto
         """
         tok = self.expect(TokenType.ONERROR)
+        if self.match(TokenType.RESUME):
+            self.expect(TokenType.NEXT)
+            self.expect(TokenType.SEMICOLON)
+            return OnErrorResumeNext(line=tok.line, column=tok.column)
+
         self.expect(TokenType.GOTO)
         label = ""
         if self.current().type == TokenType.INTEGER:
             label = self.advance().value
         elif self.current().type == TokenType.IDENTIFIER:
             label = self.advance().value
-        self.match(TokenType.SEMICOLON)
+        if self.strict:
+            self.expect(TokenType.SEMICOLON)
+        else:
+            self.match(TokenType.SEMICOLON)
         return OnErrorGoto(label=label, line=tok.line, column=tok.column)
+
+    def parse_scheduler_block(self) -> SchedulerBlock:
+        """Parse activity(...) { ... } and actionblock(...) { ... }."""
+        tok = self.advance()
+        self.expect(TokenType.LPAREN)
+        arguments = []
+        while self.current().type != TokenType.RPAREN and not self.at_end():
+            arguments.append(self.parse_expression())
+            if not self.match(TokenType.COMMA):
+                break
+        self.expect(TokenType.RPAREN)
+        body = self.parse_block()
+        return SchedulerBlock(
+            kind=tok.value, arguments=arguments, body=body,
+            line=tok.line, column=tok.column, file=tok.file
+        )
 
     def parse_statement_or_block(self) -> ASTNode:
         """Parse either a ``{ block }`` or a single statement.

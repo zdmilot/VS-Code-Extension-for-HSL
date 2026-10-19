@@ -189,7 +189,7 @@ All hardware-facing operations are stubbed:
 | `object.CreateObject()` | Creates stub; logs ProgID |
 | `file.Open()` / `file.ReadString()` | File reads work; writes are stubbed |
 | `Fork()` / `Join()` | Not implemented (single-threaded simulation) |
-| `onerror goto` / `resume next` | Error handler labels tracked; `resume next` is a no-op |
+| `onerror goto` / `onerror resume next` / `resume next` | Simulated error-handler state and label dispatch |
 
 ---
 
@@ -202,7 +202,7 @@ Tested against Hamilton demo methods:
 | TraceLevel Demo.hsl | 186,927 | 648 | ~100 | Executes `main()`, hits intentional `abort` |
 | CustomDialogs.hsl | 213,969 | 704 | ~123 | Executes through full dialog simulation |
 
-Parse warnings are mostly in Hamilton library code (unsupported `^` operator, path edge cases) and do not affect execution.
+Parse warnings are mostly in Hamilton library code for constructs that are intentionally stubbed or only partially simulated.
 
 ---
 
@@ -211,10 +211,9 @@ Parse warnings are mostly in Hamilton library code (unsupported `^` operator, pa
 - **No real hardware**: By design. All device calls are simulation stubs.
 - **No COM interop**: `object.CreateObject()` creates a property bag, not a real COM object.
 - **No threading**: `Fork()` / `Join()` are not simulated.
-- **No `struct`**: Structure types (`struct { ... }`) are not parsed.
-- **No `loop` keyword**: The `loop(N)` construct is not yet implemented.
-- **No `^` operator**: Power operator (`^`) is not yet supported in the parser/interpreter.
-- **Partial error recovery**: ~100-123 parse warnings on complex Hamilton libraries; these do not prevent execution.
+- **No structure-value simulation**: permissive mode may recover past `struct` declarations; strict mode rejects them explicitly instead of pretending to execute their semantics.
+- **Selectable external-call handling**: permissive mode logs unsupported external functions and returns a neutral value; strict mode fails on them.
+- **Behavioral compatibility, not VENUS replacement**: parser and control-flow behavior are tested against installed HSL sources, but hardware, COM, Scheduler concurrency, firmware, and proprietary runtime services remain explicit simulations.
 
 ---
 

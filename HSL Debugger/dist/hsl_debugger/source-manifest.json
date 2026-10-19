@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "files": {
+    "__init__.py": "00d9b841972ea3d6e7249b5133300b55cb9304ee3042c0f4f9d53edd8dc2a471",
+    "ast_nodes.py": "78e47ccce83b1fd19f8d85a7ca8db47086eed8a0cc546211907cbd888d77e271",
+    "com_objects.py": "bad453b2897a070e1a16bc7f56d0b12249227721e5c4cc486a0c83fe515dd454",
+    "firmware.py": "bd8d018b6a832038ccfd0a6f478deb6d517da0b751bce948744902d2c139cc1d",
+    "interpreter.py": "fa60fcf8e0aa3e03a6b9ef62b29c0299918106203dd2c9163873359208076989",
+    "lexer.py": "e111ffc85cc37fd07da65c545493a3312ce19d313a4c7b7c5f144486b53c6366",
+    "main.py": "b52884dd0d77260aecd64eb7dfa407c4d33c926785ff4f48677c09e19568027c",
+    "parser.py": "8270bf8c7fbeeae1c7925107ec726e333e2c95f3db0dc9c6df3dadc50cc8a3a5",
+    "preprocessor.py": "877a906b52e3170988ca80694d6c95cd179325fa6e8003c766eb71e14957dede"
+  }
+}

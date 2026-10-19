@@ -1,4 +1,7 @@
 out/
+node_modules/
+**/__pycache__/
+*.py[cod]
 .vs/
 bin/
 obj/

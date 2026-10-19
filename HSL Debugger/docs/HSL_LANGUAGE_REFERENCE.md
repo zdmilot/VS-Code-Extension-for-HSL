@@ -99,15 +99,14 @@ String escape sequences:
 
 ```
 abort        activity     actionblock  break        const
-continue     device       dialog       else         error
-event        executoronly file         for          fork
-function     global       goto         if           join
-lock         loop         method       namespace    next
-object       oncanceltask onerror      pause        private
-resource     resume       return       schedule     scheduleronly
-sequence     static       string       struct       synchronized
-timer        unlock       variable     void         while
-workflow
+device       dialog       else         error        event
+executoronly file         for          fork         function
+global       goto         if           join         lock
+loop         method       namespace    next         object
+oncanceltask onerror      pause        private      resource
+resume       return       schedule     scheduleronly sequence
+static       string       struct       synchronized timer
+unlock       variable     void         while        workflow
 ```
 
 ### Special Tokens
@@ -365,15 +364,21 @@ while (condition)
     // loop body
     if (done)
         break;
-    if (skip)
-        continue;
+    if (!skip)
+    {
+        // work for this iteration
+    }
 }
 ```
 
-### break and continue
+### break and loop continuation
 
 - `break;` -- exits the innermost `for` or `while` loop
-- `continue;` -- skips to the next iteration of the innermost loop
+
+HSL does not support the C/C++ `continue` keyword and does not have a
+standalone `next;` loop statement. Restructure the loop body with a condition
+or control flag. The word `next` is reserved for the error-handling forms
+`resume next;` and `onerror resume next;`.
 
 ### return
 

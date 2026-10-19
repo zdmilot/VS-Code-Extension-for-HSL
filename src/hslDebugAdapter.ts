@@ -36,11 +36,12 @@ interface LaunchArguments {
   hamiltonDir?: string;
   verbose?: boolean;
   noDebug?: boolean;
+  strictSimulation?: boolean;
 }
 
-const HXRUN_PATH = "C:\\Program Files (x86)\\Hamilton\\Bin\\HxRun.exe";
-const LOGFILE_DIR = "C:\\Program Files (x86)\\Hamilton\\Logfiles";
-const VALID_EXTENSIONS = [".hsl", ".hs_", ".hsi", ".sub", ".med"];
+const DEFAULT_HAMILTON_DIR = "C:\\Program Files (x86)\\Hamilton";
+const VALID_HXRUN_EXTENSIONS = [".hsl", ".sub", ".med"];
+const VALID_SIMULATION_EXTENSIONS = [".hsl", ".sub"];
 
 /**
  * Minimal inline Debug Adapter that supports two modes:
@@ -57,6 +58,10 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
   private _traceInterval: ReturnType<typeof setInterval> | undefined;
   private _pendingLaunchRequest: DapRequest | undefined;
   private _pendingLaunchArgs: LaunchArguments | undefined;
+  private _logfileDir = path.join(DEFAULT_HAMILTON_DIR, "Logfiles");
+  private _traceReadNewContent: (() => void) | undefined;
+  private _traceBuffer = "";
+  private _simulationFaults = 0;
   private readonly _onDidSendMessage = new vscode.EventEmitter<DapResponse | DapEvent>();
   readonly onDidSendMessage: vscode.Event<DapResponse | DapEvent> = this._onDidSendMessage.event;
 
@@ -116,10 +121,13 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
     }
 
     const ext = path.extname(program).toLowerCase();
-    if (!VALID_EXTENSIONS.includes(ext)) {
+    const validExtensions = args.noDebug
+      ? VALID_HXRUN_EXTENSIONS
+      : VALID_SIMULATION_EXTENSIONS;
+    if (!validExtensions.includes(ext)) {
       this._sendErrorResponse(
         request,
-        `Cannot run file with extension '${ext}'. Valid: ${VALID_EXTENSIONS.join(", ")}`
+        `Cannot ${args.noDebug ? "run" : "simulate"} file with extension '${ext}'. Valid: ${validExtensions.join(", ")}`
       );
       this._sendEvent("terminated");
       return;
@@ -137,10 +145,13 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
   private _handleRunWithoutDebugging(
     _request: DapRequest,
     program: string,
-    _args: LaunchArguments
+    args: LaunchArguments
   ): void {
-    if (!fs.existsSync(HXRUN_PATH)) {
-      this._outputLine(`HxRun.exe not found at: ${HXRUN_PATH}`, "stderr");
+    const hamiltonDir = args.hamiltonDir || DEFAULT_HAMILTON_DIR;
+    const hxRunPath = path.join(hamiltonDir, "Bin", "HxRun.exe");
+    this._logfileDir = path.join(hamiltonDir, "Logfiles");
+    if (!fs.existsSync(hxRunPath)) {
+      this._outputLine(`HxRun.exe not found at: ${hxRunPath}`, "stderr");
       this._outputLine("Make sure Hamilton VENUS is installed.", "stderr");
       this._sendEvent("terminated");
       return;
@@ -152,8 +163,8 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
     this._outputLine("  Hamilton HxRun -- Run Without Debugging");
     this._outputLine("=".repeat(60));
     this._outputLine(`  Method:  ${path.basename(program)}`);
-    this._outputLine(`  HxRun:   ${HXRUN_PATH}`);
-    this._outputLine(`  Logdir:  ${LOGFILE_DIR}`);
+    this._outputLine(`  HxRun:   ${hxRunPath}`);
+    this._outputLine(`  Logdir:  ${this._logfileDir}`);
     this._outputLine("");
 
     // Record the timestamp just before launch so we can find only newer trace files
@@ -162,7 +173,7 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
     // Spawn HxRun.exe with -t (run & terminate) and -minimized
     try {
       this._process = cp.spawn(
-        HXRUN_PATH,
+        hxRunPath,
         [program, "-t", "-minimized"],
         { shell: false }
       );
@@ -219,12 +230,12 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
 
     // Watch the directory for new files. The watcher fires on any change.
     try {
-      this._traceWatcher = fs.watch(LOGFILE_DIR, (eventType, filename) => {
+      this._traceWatcher = fs.watch(this._logfileDir, (_eventType, filename) => {
         if (found || !filename) {
           return;
         }
         if (traceRegex.test(filename)) {
-          const fullPath = path.join(LOGFILE_DIR, filename);
+          const fullPath = path.join(this._logfileDir, filename);
           // Verify it was created after our launch
           try {
             const stat = fs.statSync(fullPath);
@@ -277,14 +288,14 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
     launchTime: number
   ): string | undefined {
     try {
-      const files = fs.readdirSync(LOGFILE_DIR);
+      const files = fs.readdirSync(this._logfileDir);
       let best: { path: string; mtime: number } | undefined;
 
       for (const f of files) {
         if (!traceRegex.test(f)) {
           continue;
         }
-        const full = path.join(LOGFILE_DIR, f);
+        const full = path.join(this._logfileDir, f);
         try {
           const stat = fs.statSync(full);
           if (stat.mtimeMs >= launchTime - 2000) {
@@ -320,7 +331,7 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
    */
   private _startTailing(tracePath: string): void {
     let offset = 0;
-    let buffer = "";
+    this._traceBuffer = "";
 
     const readNewContent = () => {
       try {
@@ -333,12 +344,12 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
           const chunk = Buffer.alloc(stat.size - offset);
           fs.readSync(fd, chunk, 0, chunk.length, offset);
           offset = stat.size;
-          buffer += chunk.toString("utf-8");
+          this._traceBuffer += chunk.toString("utf-8");
 
           // Emit complete lines
-          const lines = buffer.split(/\r?\n/);
+          const lines = this._traceBuffer.split(/\r?\n/);
           // Keep the last (possibly incomplete) line in the buffer
-          buffer = lines.pop() || "";
+          this._traceBuffer = lines.pop() || "";
           for (const line of lines) {
             this._outputLine(line);
           }
@@ -352,6 +363,7 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
 
     // Poll every 500ms
     this._traceInterval = setInterval(readNewContent, 500);
+    this._traceReadNewContent = readNewContent;
 
     // Do an immediate first read
     readNewContent();
@@ -362,11 +374,10 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
    * then cleans up all watchers/intervals and fires the terminated event.
    */
   private _finishTraceTailing(exitCode: number | null): void {
-    // Final flush: trigger one last read before cleanup
-    if (this._traceInterval) {
-      // The interval callback captures its own state, so we just let it
-      // run one more time synchronously isn't possible -- instead, wait
-      // a brief moment then clean up.
+    this._traceReadNewContent?.();
+    if (this._traceBuffer.length > 0) {
+      this._outputLine(this._traceBuffer);
+      this._traceBuffer = "";
     }
 
     // Small delay to catch final writes, then clean up
@@ -395,6 +406,8 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
       clearInterval(this._traceInterval);
       this._traceInterval = undefined;
     }
+    this._traceReadNewContent = undefined;
+    this._traceBuffer = "";
     if (this._traceStream) {
       this._traceStream.destroy();
       this._traceStream = undefined;
@@ -416,8 +429,9 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
     const debuggerDir = path.join(extensionRoot, "HSL Debugger");
     const bundledExe = path.join(debuggerDir, "dist", "hsl_debugger", "hsl_debugger.exe");
 
-    const hamiltonDir = args?.hamiltonDir || "C:\\Program Files (x86)\\Hamilton";
+    const hamiltonDir = args?.hamiltonDir || DEFAULT_HAMILTON_DIR;
     const verbose = args?.verbose !== false;
+    const strictSimulation = args?.strictSimulation !== false;
 
     if (!fs.existsSync(bundledExe)) {
       this._outputLine(
@@ -433,6 +447,9 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
 
     if (!verbose) {
       spawnArgs.push("--quiet");
+    }
+    if (strictSimulation) {
+      spawnArgs.push("--strict");
     }
 
     this._outputLine("=".repeat(60));
@@ -453,10 +470,17 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
         env,
       });
 
+      this._simulationFaults = 0;
       this._process.stdout!.on("data", (data: Buffer) => {
         const text = data.toString();
         for (const line of text.split(/\r?\n/)) {
           if (line.length > 0) {
+            if (
+              strictSimulation &&
+              /\[SIM\] Unknown function:|Division by zero|Modulo by zero|\[HSL ERROR\]/i.test(line)
+            ) {
+              this._simulationFaults++;
+            }
             this._outputLine(line);
           }
         }
@@ -474,7 +498,14 @@ export class HslInlineDebugAdapter implements vscode.DebugAdapter {
       this._process.on("close", (code) => {
         this._outputLine("");
         if (code === 0) {
-          this._outputLine("HSL method completed successfully.");
+          if (strictSimulation && this._simulationFaults > 0) {
+            this._outputLine(
+              `HSL simulation completed with ${this._simulationFaults} strict validation fault${this._simulationFaults === 1 ? "" : "s"}.`,
+              "stderr"
+            );
+          } else {
+            this._outputLine("HSL method completed successfully.");
+          }
         } else {
           this._outputLine(`HSL method exited with code ${code}.`, "stderr");
         }
@@ -588,9 +619,10 @@ export class HslDebugConfigurationProvider implements vscode.DebugConfigurationP
       const editor = vscode.window.activeTextEditor;
       if (editor && editor.document.languageId === "hsl") {
         config.type = "hsl";
-        config.name = "Run HSL Method";
+        config.name = "Simulate HSL Method";
         config.request = "launch";
         config.program = "${file}";
+        config.strictSimulation = true;
       }
     }
 

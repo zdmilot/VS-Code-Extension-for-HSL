@@ -298,7 +298,7 @@ Pass 2: Execution
   → Search for entry point: main / Main / _Method::main / _Method::Main
   → Call the entry function
   → Execute statements in order
-  → Handle control flow (if/for/while/break/continue/return/abort)
+  → Handle control flow (if/for/while/loop/break/return/abort)
   → Dispatch function calls (built-in → builtin handler, user → AST walk)
   → Evaluate expressions with type coercion
 ```
@@ -371,7 +371,7 @@ Loop constructs (`for`, `while`) catch `BreakException`. Function calls catch `R
 
 1. **Simulation fidelity**: An interpreter can stub every hardware call at the function level without generating intermediate code
 2. **Debugger integration**: Step-by-step execution with breakpoints is natural in an interpreter
-3. **Error tolerance**: The interpreter can continue past unknown functions by returning default values
+3. **Selectable validation**: permissive mode can stub unknown external calls, while strict mode reports them as runtime errors
 4. **Simplicity**: No code generation target, no linking, no runtime library
 
 ### Why Recursive Descent?

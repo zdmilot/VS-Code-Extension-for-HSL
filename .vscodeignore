@@ -1,7 +1,24 @@
 .vscode/**
 .vscode-test/**
+.github/**
+.git/**
 .gitignore
 vsc-extension-quickstart.md
+src/**
+test/**
+scripts/**
+dotnet/**
+node_modules/**
+solutionToBlockMarkers/**
+Package Files/**
+Firmware Support/**
+Logfiles Support/**
 HSL Debugger/build/**
 HSL Debugger/*.spec
 HSL Debugger/hsl_runtime/__pycache__/**
+HSL Debugger/hsl_runtime/**
+HSL Debugger/docs/**
+HSL Debugger/README.md
+out/*.map
+**/__pycache__/**
+*.py[cod]

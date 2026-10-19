@@ -402,6 +402,13 @@ class ReturnException(Exception):
 class AbortException(Exception):
     pass
 
+class ResumeNextException(Exception):
+    pass
+
+class HslRuntimeError(RuntimeError):
+    """Runtime failure that can be handled by HSL onerror directives."""
+    pass
+
 
 # ============================================================================
 # Execution Environment
@@ -473,13 +480,22 @@ class TraceOutput:
 class Interpreter:
     """HSL AST Interpreter - SIMULATION ONLY."""
 
-    def __init__(self, trace: Optional[TraceOutput] = None):
+    def __init__(self, trace: Optional[TraceOutput] = None, strict: bool = False,
+                 hamilton_dir: Optional[str] = None):
         self.trace = trace or TraceOutput()
+        self.strict = strict
         self.global_scope = Scope()
         self.current_scope = self.global_scope
         self.functions: dict[str, FunctionDeclaration] = {}
         self.namespaces: dict[str, dict] = {}  # namespace -> {name: value}
         self.error_handler: Optional[str] = None
+        self._last_error = {"id": 0, "description": "", "source": ""}
+        self._lock_depth = 0
+        self.execution_mode = "executor"
+        self.hamilton_dir = hamilton_dir or os.environ.get(
+            'HAMILTON_DIR', r'C:\Program Files (x86)\Hamilton'
+        )
+        self.source_file = ""
         self.call_stack: list[str] = []
         self._max_iterations = 100000  # Safety limit
         self._iteration_count = 0
@@ -532,6 +548,7 @@ class Interpreter:
 
     def execute(self, program: Program):
         """Execute a parsed HSL program."""
+        self.source_file = program.source_file
         self.trace.trace(f"=== HSL Simulation Runtime v0.1 ===")
         self.trace.trace(f"Source: {program.source_file}")
         self.trace.trace(f"SIMULATION MODE - No hardware interaction")
@@ -546,6 +563,13 @@ class Interpreter:
                 main_name = candidate
                 break
 
+        if main_name is None:
+            for name, declaration in self.functions.items():
+                if declaration.is_workflow and declaration.body is not None:
+                    main_name = name
+                    self.execution_mode = "scheduler"
+                    break
+
         if main_name:
             self.trace.trace(f"Executing {main_name}()...")
             try:
@@ -556,8 +580,12 @@ class Interpreter:
                 self.trace.trace("Method returned from main.")
             except Exception as e:
                 self.trace.error(f"Runtime error: {e}")
+                if self.strict:
+                    raise
                 traceback.print_exc()
         else:
+            if self.strict:
+                raise HslRuntimeError("No executable method main() or workflow was found")
             self.trace.warn("No main() method found. Executing declarations only.")
             for decl in program.declarations:
                 try:
@@ -579,7 +607,9 @@ class Interpreter:
         """First pass: collect all function and namespace declarations."""
         for decl in declarations:
             if isinstance(decl, FunctionDeclaration):
-                self.functions[decl.name] = decl
+                existing = self.functions.get(decl.name)
+                if existing is None or decl.body is not None or existing.body is None:
+                    self.functions[decl.name] = decl
             elif isinstance(decl, NamespaceDeclaration):
                 self._collect_namespace(decl, "")
             elif isinstance(decl, VariableDeclaration):
@@ -597,8 +627,10 @@ class Interpreter:
             for stmt in ns.body.statements:
                 if isinstance(stmt, FunctionDeclaration):
                     qualified_name = f"{full_name}::{stmt.name}"
-                    self.functions[qualified_name] = stmt
-                    self.namespaces[full_name][stmt.name] = stmt
+                    existing = self.functions.get(qualified_name)
+                    if existing is None or stmt.body is not None or existing.body is None:
+                        self.functions[qualified_name] = stmt
+                        self.namespaces[full_name][stmt.name] = stmt
                 elif isinstance(stmt, NamespaceDeclaration):
                     self._collect_namespace(stmt, full_name)
                 elif isinstance(stmt, VariableDeclaration):
@@ -658,10 +690,26 @@ class Interpreter:
         if isinstance(node, PauseStatement):
             self.trace.trace("PAUSE (simulation: continuing)")
             return None
+        if isinstance(node, LockStatement):
+            self._lock_depth += 1
+            return None
+        if isinstance(node, UnlockStatement):
+            if self._lock_depth == 0:
+                if self.strict:
+                    raise HslRuntimeError("unlock; executed without a matching lock;")
+                self.trace.warn("unlock; executed without a matching lock;")
+            else:
+                self._lock_depth -= 1
+            return None
+        if isinstance(node, RuntimeExecute):
+            return self._execute_runtime_source(node)
         if isinstance(node, OnErrorGoto):
             self.error_handler = node.label if node.label != "0" else None
             return None
         if isinstance(node, ResumeNext):
+            raise ResumeNextException()
+        if isinstance(node, OnErrorResumeNext):
+            self.error_handler = "__resume_next__"
             return None
         if isinstance(node, NamespaceDeclaration):
             self._collect_namespace(node, "")
@@ -670,15 +718,18 @@ class Interpreter:
             self.functions[node.name] = node
             return None
         if isinstance(node, SchedulerOnlyBlock):
-            # Skip scheduler-only code in simulation
+            if self.execution_mode == "scheduler":
+                return self._execute_node(node.body)
             return None
         if isinstance(node, ExecutorOnlyBlock):
-            # Execute executor-only code
+            if self.execution_mode == "executor":
+                return self._execute_node(node.body)
+            return None
+        if isinstance(node, SchedulerBlock):
+            self.trace.trace(f"[SIM] {node.kind} block")
             return self._execute_node(node.body)
         if isinstance(node, Label):
-            # Register label; if it has a body, execute it
-            if node.body:
-                return self._execute_node(node.body)
+            # Labels are jump targets and do not execute during fall-through.
             return None
 
         # Expression nodes
@@ -687,9 +738,79 @@ class Interpreter:
     def _execute_block(self, block: Block) -> Any:
         """Execute a block of statements."""
         result = None
-        for stmt in block.statements:
-            result = self._execute_node(stmt)
+        labels = {
+            stmt.name: stmt for stmt in block.statements if isinstance(stmt, Label)
+        }
+        index = 0
+        while index < len(block.statements):
+            stmt = block.statements[index]
+            if isinstance(stmt, Label):
+                index += 1
+                continue
+            try:
+                result = self._execute_node(stmt)
+            except HslRuntimeError as error:
+                self._last_error["description"] = str(error)
+                self._last_error["source"] = self.call_stack[-1] if self.call_stack else "main"
+                if self.error_handler == "__resume_next__":
+                    self.trace.warn(f"onerror resume next: {error}")
+                    index += 1
+                    continue
+                handler = labels.get(self.error_handler or "")
+                if handler is None:
+                    raise
+                try:
+                    if handler.body is not None:
+                        self._execute_node(handler.body)
+                except ResumeNextException:
+                    index += 1
+                    continue
+                return result
+            index += 1
         return result
+
+    def _execute_runtime_source(self, node: RuntimeExecute) -> None:
+        """Implement HSL's << expression runtime parse/execute operator."""
+        source_value = str(self._to_python(self._eval_expr(node.source)))
+        candidate_paths = []
+        if self.source_file:
+            candidate_paths.append(os.path.join(os.path.dirname(self.source_file), source_value))
+        candidate_paths.extend([
+            os.path.join(self.hamilton_dir, 'Library', source_value),
+            os.path.join(self.hamilton_dir, 'Methods', source_value),
+            source_value,
+        ])
+        source_path = next((path for path in candidate_paths if os.path.isfile(path)), None)
+
+        try:
+            from .lexer import Lexer
+            from .parser import Parser
+            if source_path is not None:
+                from .preprocessor import Preprocessor
+                source_text = Preprocessor(
+                    hamilton_dir=self.hamilton_dir, strict=self.strict
+                ).preprocess_file(source_path)
+                filename = source_path
+            else:
+                source_text = source_value
+                filename = node.file or '<runtime>'
+
+            parser = Parser(
+                Lexer(source_text, filename).tokenize(),
+                filename,
+                strict=self.strict,
+            )
+            program = parser.parse()
+            self._collect_declarations(program.declarations)
+            for declaration in program.declarations:
+                if not isinstance(declaration, (FunctionDeclaration, NamespaceDeclaration)):
+                    self._execute_node(declaration)
+        except Exception as error:
+            if self.strict:
+                raise HslRuntimeError(
+                    f"Runtime HSL execution failed for {source_value!r}: {error}"
+                ) from error
+            self.trace.warn(f"Runtime HSL execution skipped: {error}")
 
     def _execute_var_decl(self, decl: VariableDeclaration, namespace: str = "") -> None:
         """Execute a variable declaration."""
@@ -710,6 +831,11 @@ class Interpreter:
             self.trace.trace(f"[SIM] Device declared: {decl.name} (layout={layout}, SIMULATION)")
         elif decl.is_array:
             val = HslArray()
+            if decl.initializer is not None:
+                size = int(self._to_python(self._eval_expr(decl.initializer)))
+                if size < 0:
+                    raise HslRuntimeError(f"Array size cannot be negative: {size}")
+                val.set_size(size)
         elif decl.var_type == 'sequence':
             val = HslSequence(decl.name)
         elif decl.var_type == 'file':
@@ -722,8 +848,16 @@ class Interpreter:
             val = HslEvent()
         elif decl.var_type == 'dialog':
             val = HslDialog()
+        elif decl.var_type == 'resource':
+            val = HslObject()
+            val.properties['constructor_args'] = [
+                self._eval_expr(argument) for argument in decl.constructor_args
+            ]
         elif decl.var_type == 'string':
-            val = HslValue("")
+            if decl.initializer is not None:
+                val = HslValue(str(self._to_python(self._eval_expr(decl.initializer))))
+            else:
+                val = HslValue("")
         else:
             # variable
             if decl.initializer is not None:
@@ -987,12 +1121,17 @@ class Interpreter:
     def _eval_binary_op(self, node: BinaryOp) -> HslValue:
         """Evaluate a binary operation."""
         left = self._eval_expr(node.left)
-        right = self._eval_expr(node.right)
+        op = node.operator
 
+        # HSL logical operators short-circuit like their C counterparts.
+        if op == '&&' and not self._is_truthy(left):
+            return HslValue(0)
+        if op == '||' and self._is_truthy(left):
+            return HslValue(1)
+
+        right = self._eval_expr(node.right)
         lv = self._to_python(left)
         rv = self._to_python(right)
-
-        op = node.operator
 
         # String concatenation with +
         if op == '+' and (isinstance(lv, str) or isinstance(rv, str)):
@@ -1008,6 +1147,8 @@ class Interpreter:
                 return HslValue(lv * rv)
             if op == '/':
                 if rv == 0:
+                    if self.strict:
+                        raise HslRuntimeError("Division by zero")
                     self.trace.warn("Division by zero")
                     return HslValue(0)
                 if isinstance(lv, int) and isinstance(rv, int):
@@ -1015,6 +1156,8 @@ class Interpreter:
                 return HslValue(lv / rv)
             if op == '%':
                 if rv == 0:
+                    if self.strict:
+                        raise HslRuntimeError("Modulo by zero")
                     return HslValue(0)
                 return HslValue(lv % rv)
             if op == '^':
@@ -1063,7 +1206,7 @@ class Interpreter:
             except (TypeError, ValueError):
                 return HslValue(0)
 
-        # Logical
+        # Logical (the right operand was evaluated only when required).
         if op == '&&':
             return HslValue(1 if (self._is_truthy(left) and self._is_truthy(right)) else 0)
         if op == '||':
@@ -1134,6 +1277,30 @@ class Interpreter:
 
     def _eval_method_call(self, node: MethodCall) -> Any:
         """Evaluate a method call on an object."""
+        if isinstance(node.object, Identifier) and node.object.name == 'err':
+            args = [self._eval_expr(a) for a in node.arguments]
+            method = node.method
+            if method == 'Raise':
+                values = [self._to_python(a) for a in args]
+                error_id = values[0] if values else 0
+                description = values[1] if len(values) > 1 else (values[0] if values else "HSL error")
+                source = values[2] if len(values) > 2 else (self.call_stack[-1] if self.call_stack else "main")
+                self._last_error = {
+                    "id": error_id,
+                    "description": str(description),
+                    "source": str(source),
+                }
+                raise HslRuntimeError(str(description))
+            if method == 'GetDescription':
+                return HslValue(self._last_error["description"])
+            if method == 'GetId':
+                return HslValue(self._last_error["id"])
+            if method == 'GetSource':
+                return HslValue(self._last_error["source"])
+            if method == 'Clear':
+                self._last_error = {"id": 0, "description": "", "source": ""}
+                return HslValue(0)
+
         obj = self._eval_expr(node.object)
         args = [self._eval_expr(a) for a in node.arguments]
         method = node.method
@@ -1179,6 +1346,8 @@ class Interpreter:
             return HslValue(1 if result.success else 0)
 
         # Generic: try calling as regular function
+        if self.strict:
+            raise HslRuntimeError(f"Unknown method: {method} on {type(obj).__name__}")
         self.trace.trace(f"[SIM] Unknown method: {method} on {type(obj).__name__}")
         return HslValue(0)
 
@@ -1559,19 +1728,33 @@ class Interpreter:
                 return result
 
         if func is None:
-            # Unknown function - just log and return 0 in simulation mode
+            if self.strict:
+                raise HslRuntimeError(f"Unknown function: {name}")
+            # Unknown function - log and return 0 in permissive simulation mode
             self.trace.trace(f"[SIM] Unknown function: {name}({', '.join(str(self._to_python(a)) for a in args)})")
             return HslValue(0)
 
         if func.body is None:
+            if self.strict:
+                raise HslRuntimeError(f"Function has no implementation: {name}")
             # Forward declaration or interface stub
             self.trace.trace(f"[SIM] Stub function: {name}()")
             return HslValue(0)
 
+        if self.strict and len(args) != len(func.parameters):
+            raise HslRuntimeError(
+                f"Function {name} expects {len(func.parameters)} argument(s), got {len(args)}"
+            )
+
         # Create new scope for function
         old_scope = self.current_scope
+        old_error_handler = self.error_handler
+        old_lock_depth = self._lock_depth
         self.current_scope = Scope(parent=self.global_scope)
+        self.error_handler = None
         self.call_stack.append(resolved_name)
+        if func.is_synchronized:
+            self._lock_depth += 1
 
         # Bind parameters
         for i, param in enumerate(func.parameters):
@@ -1580,6 +1763,8 @@ class Interpreter:
                 if not isinstance(val, (HslValue, HslArray, HslSequence, HslDevice,
                                         HslFile, HslObject, HslTimer, HslEvent, HslDialog)):
                     val = HslValue(val)
+                elif isinstance(val, HslValue) and not param.is_reference:
+                    val = HslValue(val._value)
                 self.current_scope.set_local(param.name, val)
             else:
                 self.current_scope.set_local(param.name, HslValue(0))
@@ -1587,13 +1772,16 @@ class Interpreter:
         # Execute function body
         result = HslValue(0)
         try:
-            self._execute_node(func.body)
-        except ReturnException as e:
-            if e.value is not None:
-                result = e.value
-
-        self.call_stack.pop()
-        self.current_scope = old_scope
+            try:
+                self._execute_node(func.body)
+            except ReturnException as e:
+                if e.value is not None:
+                    result = e.value
+        finally:
+            self.call_stack.pop()
+            self.current_scope = old_scope
+            self.error_handler = old_error_handler
+            self._lock_depth = old_lock_depth
         return result
 
     # ========================================================================

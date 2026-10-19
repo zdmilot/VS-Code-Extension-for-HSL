@@ -2352,7 +2352,35 @@ export interface KeywordEntry {
  * Canonical list of HSL reserved keywords.
  * Add new entries here and the completion provider picks them up automatically.
  */
+const ADDITIONAL_KEYWORDS: KeywordEntry[] = [
+  ["if", "Conditional branch"],
+  ["else", "Alternative conditional branch"],
+  ["for", "Counted loop"],
+  ["while", "Conditional loop"],
+  ["fork", "Begin parallel execution"],
+  ["join", "Wait for parallel execution"],
+  ["namespace", "Declare a namespace"],
+  ["function", "Declare or define a function"],
+  ["method", "Declare a method entry point"],
+  ["struct", "Declare a structure type"],
+  ["activity", "Declare a scheduler activity"],
+  ["actionblock", "Declare a scheduler action block"],
+  ["executoronly", "Restrict a block to executor mode"],
+  ["oncancelaction", "Declare scheduler action cancellation behavior"],
+  ["oncanceltask", "Declare scheduler task cancellation behavior"],
+  ["reschedule", "Request scheduler rescheduling"],
+  ["schedule", "Schedule workflow work"],
+  ["scheduleronly", "Restrict a block to scheduler mode"],
+  ["schedulerprompt", "Show a scheduler prompt"],
+  ["workflow", "Declare a scheduler workflow"],
+].map(([name, description]) => ({
+  name,
+  description,
+  documentation: `HSL reserved keyword: \`${name}\`. ${description}.`,
+}));
+
 export const KEYWORDS: KeywordEntry[] = [
+  ...ADDITIONAL_KEYWORDS,
   {
     name: "break",
     description: "Exit the current loop",
@@ -2375,7 +2403,7 @@ export const KEYWORDS: KeywordEntry[] = [
     name: "onerror",
     description: "Error handler directive",
     documentation:
-      "The `onerror` statement defines how errors are handled.\n\n**Usage:**\n- `onerror goto <label>;` -- jump to a label on error.\n- `onerror goto 0;` -- disable the current error handler.\n\nThe error handler has access to the `err` object to inspect error details.",
+      "The `onerror` statement defines how errors are handled.\n\n**Usage:**\n- `onerror goto <label>;` -- jump to a label on error.\n- `onerror goto 0;` -- disable the current error handler.\n- `onerror resume next;` -- suppress an error and continue with the following statement.\n\nThe error handler has access to the `err` object to inspect error details.",
   },
   {
     name: "resume",
@@ -2391,21 +2419,21 @@ export const KEYWORDS: KeywordEntry[] = [
   },
   {
     name: "next",
-    description: "Skip to the next loop iteration",
+    description: "Complete a resume-next error directive",
     documentation:
-      "The `next` statement skips the remainder of the current loop iteration and continues with the next iteration.\n\nSimilar to `continue` in C/C++.",
+      "`next` is not a standalone loop statement in HSL. It is valid only in the error-handling forms `resume next;` and `onerror resume next;`. HSL has no C/C++ `continue` statement; restructure the loop body with a condition or control flag instead.",
   },
   {
     name: "lock",
     description: "Lock access to a synchronized scope",
     documentation:
-      "The `lock` statement locks access to a shared resource. Used with `synchronized` variables to prevent concurrent access in multi-threaded scenarios.\n\n**Usage:** `lock(syncVariable) { ... }`",
+      "The `lock` statement prevents interruption of the current execution region until a matching `unlock;` is reached.\n\n**Usage:** `lock;`",
   },
   {
     name: "unlock",
     description: "Unlock access to a synchronized scope",
     documentation:
-      "The `unlock` statement releases a previously acquired lock on a synchronized variable.\n\n**Usage:** Used in conjunction with `lock` for thread synchronization.",
+      "The `unlock` statement ends the execution region started by `lock;`.\n\n**Usage:** `unlock;`",
   },
   {
     name: "pause",

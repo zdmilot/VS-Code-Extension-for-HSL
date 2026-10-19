@@ -20,9 +20,13 @@
   "main": "./out/extension.js",
   "activationEvents": ["onLanguage:hsl", "onLanguage:hsl-trace"],
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run build:checksum && npm run verify:package",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "build:checksum": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-checksum.ps1",
+    "build:simulator": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-simulator.ps1",
+    "verify:package": "node scripts/verify-package.js",
+    "test": "npm run compile && node --test test/hslCore.test.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
@@ -65,7 +69,7 @@
     "debuggers": [
       {
         "type": "hsl",
-        "label": "HSL Debugger",
+        "label": "HSL Simulator",
         "languages": ["hsl"],
         "configurationAttributes": {
           "launch": {
@@ -86,6 +90,11 @@
                 "description": "Show detailed trace output.",
                 "default": true
               },
+              "strictSimulation": {
+                "type": "boolean",
+                "description": "Treat unknown functions and simulated runtime faults as errors.",
+                "default": true
+              },
               "internalConsoleOptions": {
                 "type": "string",
                 "enum": ["neverOpen", "openOnFirstSessionStart", "openOnSessionStart"],
@@ -99,20 +108,20 @@
           {
             "type": "hsl",
             "request": "launch",
-            "name": "Run HSL Method",
+            "name": "Simulate HSL Method",
             "program": "${file}",
             "internalConsoleOptions": "openOnSessionStart"
           }
         ],
         "configurationSnippets": [
           {
-            "label": "HSL: Run Method",
-            "description": "Run an HSL method file using the HSL simulation debugger.",
+            "label": "HSL: Simulate Method",
+            "description": "Simulate an HSL source method without connecting to hardware.",
             "body": {
               "type": "hsl",
               "request": "launch",
-              "name": "Run HSL Method",
-              "program": "^\"\\${file}\""
+              "name": "Simulate HSL Method",
+              "program": "\\${file}"
             }
           }
         ]
@@ -121,39 +130,41 @@
     "commands": [
       {
         "command": "hsl.runMethod",
-        "title": "Run HSL Method (HxRun)",
+        "title": "Run HSL Method (Hamilton HxRun)",
         "category": "HSL",
-        "icon": "$(play)"
+        "icon": "$(play)",
+        "enablement": "hsl.hamiltonRunAvailable"
       },
       {
         "command": "hsl.debugMethod",
-        "title": "Debug HSL Method (Simulation)",
+        "title": "Simulate HSL Method (Offline)",
         "category": "HSL",
         "icon": "$(debug-alt)"
       },
       {
         "command": "hsl.openInHamiltonEditor",
         "title": "Open in Hamilton HSL Editor",
-        "category": "HSL"
+        "category": "HSL",
+        "enablement": "hsl.hamiltonEditorAvailable"
       }
     ],
     "menus": {
       "editor/title/run": [
         {
           "command": "hsl.runMethod",
-          "when": "resourceLangId == hsl || resourceExtname == .med",
+          "when": "(resourceLangId == hsl || resourceExtname == .med) && hsl.hamiltonRunAvailable",
           "group": "navigation@1"
         },
         {
           "command": "hsl.debugMethod",
-          "when": "resourceLangId == hsl || resourceExtname == .med",
+          "when": "(resourceLangId == hsl || resourceExtname == .med) && hsl.hamiltonRunAvailable",
           "group": "navigation@2"
         }
       ],
       "editor/context": [
         {
           "command": "hsl.runMethod",
-          "when": "resourceLangId == hsl || resourceExtname == .med",
+          "when": "(resourceLangId == hsl || resourceExtname == .med) && hsl.hamiltonRunAvailable",
           "group": "navigation@1"
         },
         {
@@ -186,11 +197,50 @@
       ]
     },
     "keybindings": [],
+    "customEditors": [
+      {
+        "viewType": "hsl.methodEditor",
+        "displayName": "HSL Method Overview",
+        "selector": [
+          { "filenamePattern": "*.hsl" },
+          { "filenamePattern": "*.hs_" },
+          { "filenamePattern": "*.hsi" },
+          { "filenamePattern": "*.sub" }
+        ],
+        "priority": "option"
+      }
+    ],
+    "configuration": {
+      "title": "Hamilton HSL",
+      "properties": {
+        "hsl.hamiltonDir": {
+          "type": "string",
+          "default": "C:\\Program Files (x86)\\Hamilton",
+          "description": "Optional Hamilton installation directory used only for local libraries, the Hamilton editor, and HxRun integration. Offline language support and simulation do not require it."
+        },
+        "hsl.libraryRoots": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Additional HSL include roots. Empty uses the standard Library, Methods, demo-method, and Bin folders under hsl.hamiltonDir."
+        },
+        "hsl.autoSanitizeNonAscii": {
+          "type": "boolean",
+          "default": false,
+          "description": "Replace known non-ASCII characters and remove unsupported characters before saving. Disabled by default because it changes source text."
+        },
+        "hsl.updateChecksumOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to Hamilton file validation after saving. Requires the x86 Hamilton security COM component; disabled by default so clean-machine use has no Hamilton dependency."
+        }
+      }
+    },
     "configurationDefaults": {
       "[hsl]": {
         "github.copilot.chat.codeGeneration.instructions": [
           {
-            "text": "HSL (Hamilton Standard Language) is a C-like language for Hamilton liquid handling robots. It has critical differences from C/C++/JavaScript that MUST be followed:\n\n1. VARIABLE DECLARATIONS MUST BE AT THE TOP OF EVERY CODE BLOCK: All variable declarations must appear BEFORE any executable statement in the same { } block. This includes function bodies, method bodies, namespace bodies, struct bodies, nested blocks, and file scope. Declaring a variable after any executable line in the same block is a COMPILE ERROR. Nested { } blocks reset the rule -- declarations can appear at the top of nested blocks.\n\n2. 'continue' IS NOT A VALID KEYWORD: HSL does not support 'continue' in loops. Use if/else restructuring instead. For example, instead of 'if (cond) { continue; }' use 'if (!cond) { /* body */ }'.\n\n3. NO COMPOUND ASSIGNMENT OPERATORS: HSL does not have +=, -=, *=, /= operators. Use expanded form: 'x = x + 1;' instead of 'x += 1;'. Also '=+' and '=-' are not valid -- use '= +' or '= -' (with a space).\n\n4. FUNCTIONS REQUIRE BOTH A DECLARATION AND A DEFINITION: Every function needs a forward declaration (prototype) AND a definition (implementation). Missing either is an error. Duplicate definitions are also errors.\n\n5. DATA TYPES: variable (general-purpose), string, float, short, long, char, object, sequence, device, resource, dialog, timer, event, file.\n\n6. MODIFIERS: private, static, const, global, synchronized.\n\n7. FUNCTION SYNTAX: 'function Name(variable param) returnType { }' -- return type is required (use 'void' for no return). Methods use: 'method main() { }'.\n\n8. STRING CONCATENATION: Use '+' operator or StrConcat() function.\n\n9. ERROR HANDLING: Use 'onerror goto Label;' pattern with labeled error handler blocks. Use err.GetDescription(), err.Clear(), abort.\n\n10. CONTROL FLOW: if, else, for, while, do, loop, switch, case, default, break, return, onerror, goto, abort, throw, try, catch, fork, join, lock, unlock. NOT supported: continue.\n\n11. NO C/C++/JS IDIOMS: Do not use 'for (int i = 0; ...)' -- declare 'variable i;' at block top, then 'for (i = 0; ...)'."
+            "text": "HSL rules: declare variables at the top of every block; HSL has no C/C++ 'continue' statement, and 'next' is only valid in the error-handling forms 'resume next;' and 'onerror resume next;'; do not use compound assignments such as += or -=; provide matching function declarations and definitions (which may be in companion files); use 'variable' values for '+' concatenation and 'string' values for string member functions; use 'onerror goto Label;', 'onerror goto 0;', or 'onerror resume next;' for error handling; and declare loop variables before the for statement."
           }
         ]
       }

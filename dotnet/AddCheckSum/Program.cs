@@ -1,4 +1,3 @@
-﻿using HxSecurityComLib;
 using System;
 
 namespace AddCheckSum
@@ -13,18 +12,26 @@ namespace AddCheckSum
                 return 1;
             }
 
-            var security = new HxSecurityCom() as IHxSecurityFileCom2;
-            if (security == null)
+            try
             {
-                Console.Error.WriteLine(
-                    "Failed to obtain IHxSecurityFileCom2 interface. " +
-                    "Ensure Hamilton.HxSecurityCom is registered as a 32-bit COM object " +
-                    "(regsvr32 on the native DLL, or regasm /codebase with 32-bit .NET Framework regasm).");
-                return 2;
-            }
+                var securityType = Type.GetTypeFromProgID("HxSecurityCom.HxSecurityCom");
+                if (securityType == null)
+                {
+                    Console.Error.WriteLine(
+                        "Hamilton HxSecurityCom is not registered. Ensure Hamilton VENUS is installed " +
+                        "and its 32-bit COM components are registered.");
+                    return 2;
+                }
 
-            security.SetFileValidation(args[0], 0, "//");
-            return 0;
+                dynamic security = Activator.CreateInstance(securityType);
+                security.SetFileValidation(args[0], 0, "//");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("Checksum update failed: " + ex.Message);
+                return 3;
+            }
         }
     }
 }

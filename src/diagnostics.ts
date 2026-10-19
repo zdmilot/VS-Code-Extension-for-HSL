@@ -53,6 +53,46 @@ function sanitizeNonAscii(text: string): string | undefined {
   return result;
 }
 
+const pendingChecksumUpdates = new Map<string, Promise<void>>();
+
+function checksumKey(filePath: string): string {
+  return path.normalize(filePath).toLowerCase();
+}
+
+/** Wait for a checksum update triggered by the most recent save, if any. */
+export async function waitForPendingHslChecksum(filePath: string): Promise<void> {
+  await pendingChecksumUpdates.get(checksumKey(filePath));
+}
+
+function startChecksumUpdate(
+  context: vscode.ExtensionContext,
+  filePath: string
+): void {
+  const addCheckSumExe = path.join(context.extensionPath, "out", "AddCheckSum.exe");
+  if (!fs.existsSync(addCheckSumExe)) {
+    vscode.window.showWarningMessage(
+      `HSL checksum update skipped: AddCheckSum.exe was not packaged at ${addCheckSumExe}`
+    );
+    return;
+  }
+
+  const key = checksumKey(filePath);
+  const update = new Promise<void>((resolve) => {
+    execFile(addCheckSumExe, [filePath], { windowsHide: true }, (error) => {
+      if (error) {
+        vscode.window.showWarningMessage(`HSL checksum update failed: ${error.message}`);
+      }
+      resolve();
+    });
+  });
+  pendingChecksumUpdates.set(key, update);
+  void update.finally(() => {
+    if (pendingChecksumUpdates.get(key) === update) {
+      pendingChecksumUpdates.delete(key);
+    }
+  });
+}
+
 /**
  * Creates and returns a DiagnosticCollection that validates HSL syntax.
  * Currently checks for:
@@ -70,72 +110,79 @@ export function createHslDiagnostics(
   const diagnosticCollection =
     vscode.languages.createDiagnosticCollection("hsl");
 
+  const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const scheduleRefresh = (document: vscode.TextDocument, immediate = false): void => {
+    const key = document.uri.toString();
+    const existing = refreshTimers.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const expectedVersion = document.version;
+    const timer = setTimeout(() => {
+      refreshTimers.delete(key);
+      void refreshDiagnostics(document, diagnosticCollection, expectedVersion).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`HSL diagnostics failed for ${document.uri.toString()}: ${message}`);
+      });
+    }, immediate ? 0 : 200);
+    refreshTimers.set(key, timer);
+  };
+
   // Run diagnostics on the active editor when the extension activates
   if (vscode.window.activeTextEditor?.document.languageId === "hsl") {
-    refreshDiagnostics(
-      vscode.window.activeTextEditor.document,
-      diagnosticCollection
-    );
+    scheduleRefresh(vscode.window.activeTextEditor.document, true);
   }
 
   // Re-run when a document is opened or its content changes
   context.subscriptions.push(
+    vscode.workspace.onWillSaveTextDocument((event) => {
+      const doc = event.document;
+      if (
+        doc.languageId !== "hsl" ||
+        !vscode.workspace.getConfiguration("hsl", doc.uri).get<boolean>("autoSanitizeNonAscii", false)
+      ) {
+        return;
+      }
+      const cleaned = sanitizeNonAscii(doc.getText());
+      if (cleaned === undefined) {
+        return;
+      }
+      const fullRange = new vscode.Range(
+        doc.positionAt(0),
+        doc.positionAt(doc.getText().length)
+      );
+      event.waitUntil(Promise.resolve([vscode.TextEdit.replace(fullRange, cleaned)]));
+    }),
     vscode.workspace.onDidSaveTextDocument((doc) => {
-      if (doc.languageId === "hsl") {
-        // -- Auto-replace non-ASCII characters ---------------------------
-        // Replace known non-ASCII characters (em/en dashes, mu, arrows,
-        // smart quotes, etc.) with ASCII equivalents and strip the rest.
-        // This runs before the checksum so the checksum covers the
-        // cleaned file.
-        const filePath = doc.fileName;
-        try {
-          const raw = fs.readFileSync(filePath, "utf-8");
-          const cleaned = sanitizeNonAscii(raw);
-          if (cleaned !== undefined) {
-            fs.writeFileSync(filePath, cleaned, "utf-8");
-          }
-        } catch (sanitizeErr: unknown) {
-          const msg = sanitizeErr instanceof Error ? sanitizeErr.message : String(sanitizeErr);
-          vscode.window.showWarningMessage(
-            `HSL non-ASCII cleanup failed: ${msg}`
-          );
-        }
-
-        // Use the compiled AddCheckSum.exe (.NET wrapper around
-        // IHxSecurityFileCom2::SetFileValidation).  The exe ships in
-        // the extension's out/ directory and targets x86/.NET 4.8 so
-        // it can instantiate the 32-bit Hamilton COM object.
-        const addCheckSumExe = path.join(
-          context.extensionPath, "out", "AddCheckSum.exe"
-        );
-        if (!fs.existsSync(addCheckSumExe)) {
-          vscode.window.showWarningMessage(
-            `HSL Checksum update skipped: AddCheckSum.exe not found at ${addCheckSumExe}`
-          );
-          return;
-        }
-        execFile(addCheckSumExe, [filePath], (err) => {
-          if (err) {
-            vscode.window.showWarningMessage(
-              `HSL Checksum update failed: ${err.message}`
-            );
-          }
-        });
+      if (
+        doc.languageId === "hsl" &&
+        doc.uri.scheme === "file" &&
+        vscode.workspace.getConfiguration("hsl", doc.uri).get<boolean>("updateChecksumOnSave", false)
+      ) {
+        startChecksumUpdate(context, doc.fileName);
       }
     }),
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.languageId === "hsl") {
-        refreshDiagnostics(e.document, diagnosticCollection);
+        scheduleRefresh(e.document);
       }
     }),
     vscode.workspace.onDidOpenTextDocument((doc) => {
       if (doc.languageId === "hsl") {
-        refreshDiagnostics(doc, diagnosticCollection);
+        scheduleRefresh(doc, true);
       }
     }),
     vscode.workspace.onDidCloseTextDocument((doc) => {
+      const key = doc.uri.toString();
+      const timer = refreshTimers.get(key);
+      if (timer) {
+        clearTimeout(timer);
+        refreshTimers.delete(key);
+      }
       diagnosticCollection.delete(doc.uri);
     }),
+    { dispose: () => refreshTimers.forEach((timer) => clearTimeout(timer)) },
     diagnosticCollection
   );
 
@@ -147,7 +194,8 @@ export function createHslDiagnostics(
  */
 async function refreshDiagnostics(
   document: vscode.TextDocument,
-  collection: vscode.DiagnosticCollection
+  collection: vscode.DiagnosticCollection,
+  expectedVersion: number
 ): Promise<void> {
   const diagnostics: vscode.Diagnostic[] = [];
 
@@ -224,6 +272,9 @@ async function refreshDiagnostics(
   // Check for unsupported 'continue' keyword
   checkContinueKeyword(document, ignoredRanges, diagnostics);
 
+  // `next` is only valid after `resume`, never as a loop statement.
+  checkStandaloneNext(document, ignoredRanges, diagnostics);
+
   // Check for standalone 'goto' (only 'onerror goto' is valid in HSL)
   checkStandaloneGoto(document, ignoredRanges, diagnostics);
 
@@ -243,6 +294,9 @@ async function refreshDiagnostics(
   // Check for string-only member functions called on non-string types
   checkStringMemberOnWrongType(document, ignoredRanges, diagnostics);
 
+  // Check that `string` values are not used with the variable-only '+' operator.
+  checkStringConcatenation(document, ignoredRanges, diagnostics);
+
   // NOTE: Anonymous blocks with declarations at the top are valid VENUS code.
   // The Hamilton Method Editor generates `{ variable arrRetValues[]; ... }`
   // blocks for every device step.  The real constraint -- declarations must
@@ -258,7 +312,9 @@ async function refreshDiagnostics(
   // Check for namespace-qualified variable access (only functions support ::)
   checkNamespaceQualifiedVariableAccess(document, ignoredRanges, diagnostics);
 
-  collection.set(document.uri, diagnostics);
+  if (!document.isClosed && document.version === expectedVersion) {
+    collection.set(document.uri, diagnostics);
+  }
 }
 
 // ── Function call arity enforcement ──────────────────────────────────────
@@ -1615,8 +1671,8 @@ function checkFunctionDeclarationDefinitionPairing(
           );
           const diag = new vscode.Diagnostic(
             range,
-            `Missing definition for function '${decl.displayName}'.`,
-            vscode.DiagnosticSeverity.Error
+            `No matching definition for function '${decl.displayName}' was found in this file. Verify the companion implementation/include file.`,
+            vscode.DiagnosticSeverity.Warning
           );
           diag.source = "hsl";
           diag.code = "missing-function-definition";
@@ -1674,8 +1730,8 @@ function checkFunctionDeclarationDefinitionPairing(
             );
             const diag = new vscode.Diagnostic(
               range,
-              `Missing declaration for function '${def.displayName}'.`,
-              vscode.DiagnosticSeverity.Error
+              `No matching declaration for function '${def.displayName}' was found in this file. Verify the companion interface/include file.`,
+              vscode.DiagnosticSeverity.Warning
             );
             diag.source = "hsl";
             diag.code = "missing-function-declaration";
@@ -1938,6 +1994,7 @@ function checkInitializeBeforeDeviceUse(
   diagnostics: vscode.Diagnostic[]
 ): void {
   const fullText = document.getText();
+  const cleanText = buildMaskedText(fullText, ignoredRanges);
 
   // Find `method main()` body -- we enforce Initialize-before-device-use
   // only in method main(), which is the entry point where Initialize must be
@@ -1945,18 +2002,18 @@ function checkInitializeBeforeDeviceUse(
   // `device &` parameter and must not call Initialize themselves (that is
   // checked separately in checkLibraryDeviceUsage).
   const mainMethodPattern = /\bmethod\s+main\s*\(/gi;
-  const mainMatch = mainMethodPattern.exec(fullText);
+  const mainMatch = mainMethodPattern.exec(cleanText);
   if (!mainMatch) {
     // No method main() -- this is a library file.
     // Check for library-specific device usage issues.
-    checkLibraryDeviceUsage(document, fullText, ignoredRanges, diagnostics);
+    checkLibraryDeviceUsage(document, cleanText, ignoredRanges, diagnostics);
     return;
   }
 
   // Find the opening brace of main()
   let mainBodyStart = -1;
-  for (let i = mainMatch.index + mainMatch[0].length; i < fullText.length; i++) {
-    if (fullText[i] === "{") {
+  for (let i = mainMatch.index + mainMatch[0].length; i < cleanText.length; i++) {
+    if (cleanText[i] === "{") {
       mainBodyStart = i;
       break;
     }
@@ -1968,13 +2025,10 @@ function checkInitializeBeforeDeviceUse(
   // Find the matching closing brace
   let depth = 0;
   let mainBodyEnd = -1;
-  for (let i = mainBodyStart; i < fullText.length; i++) {
-    if (isInsideIgnoredRange(i, ignoredRanges)) {
-      continue;
-    }
-    if (fullText[i] === "{") {
+  for (let i = mainBodyStart; i < cleanText.length; i++) {
+    if (cleanText[i] === "{") {
       depth++;
-    } else if (fullText[i] === "}") {
+    } else if (cleanText[i] === "}") {
       depth--;
       if (depth === 0) {
         mainBodyEnd = i;
@@ -1983,10 +2037,10 @@ function checkInitializeBeforeDeviceUse(
     }
   }
   if (mainBodyEnd < 0) {
-    mainBodyEnd = fullText.length;
+    mainBodyEnd = cleanText.length;
   }
 
-  const mainBody = fullText.slice(mainBodyStart, mainBodyEnd + 1);
+  const mainBody = cleanText.slice(mainBodyStart, mainBodyEnd + 1);
   const mainBodyOffset = mainBodyStart;
 
   // Detect `global device` declarations to learn device variable names.
@@ -1994,7 +2048,7 @@ function checkInitializeBeforeDeviceUse(
   const deviceNames = new Set<string>();
   const globalDevicePattern = /\bglobal\s+device\s+([A-Za-z_]\w*)/g;
   let devMatch: RegExpExecArray | null;
-  while ((devMatch = globalDevicePattern.exec(fullText)) !== null) {
+  while ((devMatch = globalDevicePattern.exec(cleanText)) !== null) {
     deviceNames.add(devMatch[1]);
   }
   if (deviceNames.size === 0) {
@@ -2174,6 +2228,161 @@ const NON_STRING_TYPES = new Set([
   "dialog",
 ]);
 
+interface TypedDeclaration {
+  name: string;
+  typeName: string;
+  offset: number;
+  scopeChain: number[];
+}
+
+/** Flags `next` unless it is the companion keyword in `resume next`. */
+function checkStandaloneNext(
+  document: vscode.TextDocument,
+  ignoredRanges: OffsetRange[],
+  diagnostics: vscode.Diagnostic[]
+): void {
+  const nextPattern = /\bnext\b/gi;
+  const resumePrefix = /\bresume\s+$/i;
+
+  for (let lineIndex = 0; lineIndex < document.lineCount; lineIndex++) {
+    const line = document.lineAt(lineIndex);
+    const lineText = line.text;
+    const lineOffset = document.offsetAt(line.range.start);
+    nextPattern.lastIndex = 0;
+
+    let match: RegExpExecArray | null;
+    while ((match = nextPattern.exec(lineText)) !== null) {
+      const absoluteOffset = lineOffset + match.index;
+      if (isInsideIgnoredRange(absoluteOffset, ignoredRanges)) {
+        continue;
+      }
+      if (resumePrefix.test(lineText.substring(0, match.index))) {
+        continue;
+      }
+
+      const diag = new vscode.Diagnostic(
+        new vscode.Range(lineIndex, match.index, lineIndex, match.index + match[0].length),
+        "Standalone 'next' is not valid HSL. 'next' is only valid in 'resume next;' or 'onerror resume next;'. Restructure loop continuation with a condition or control flag.",
+        vscode.DiagnosticSeverity.Error
+      );
+      diag.source = "hsl";
+      diag.code = "invalid-standalone-next";
+      diagnostics.push(diag);
+    }
+  }
+}
+
+interface BraceBlock {
+  start: number;
+  end: number;
+}
+
+function collectBraceBlocks(cleanText: string): BraceBlock[] {
+  const stack: number[] = [];
+  const blocks: BraceBlock[] = [];
+  for (let i = 0; i < cleanText.length; i++) {
+    if (cleanText[i] === "{") {
+      stack.push(i);
+    } else if (cleanText[i] === "}") {
+      const start = stack.pop();
+      if (start !== undefined) {
+        blocks.push({ start, end: i });
+      }
+    }
+  }
+  for (const start of stack) {
+    blocks.push({ start, end: cleanText.length });
+  }
+  return blocks;
+}
+
+function scopeChainAt(blocks: BraceBlock[], offset: number): number[] {
+  return blocks
+    .filter((block) => block.start < offset && offset <= block.end)
+    .sort((left, right) => left.start - right.start)
+    .map((block) => block.start);
+}
+
+function collectTypedDeclarations(cleanText: string): TypedDeclaration[] {
+  const blocks = collectBraceBlocks(cleanText);
+  const declarations: TypedDeclaration[] = [];
+  const typePattern =
+    "variable|string|sequence|device|object|timer|event|file|resource|dialog|char|short|long|float";
+
+  // Local/global declaration statements, including comma-separated names.
+  const statementPattern = new RegExp(
+    `^[ \\t]*(?:(?:private|static|const|global|synchronized)\\s+)*(${typePattern})\\s+([^;\\r\\n]+);`,
+    "gm"
+  );
+  let statementMatch: RegExpExecArray | null;
+  while ((statementMatch = statementPattern.exec(cleanText)) !== null) {
+    const typeName = statementMatch[1].toLowerCase();
+    const body = statementMatch[2];
+    const bodyOffset = statementMatch.index + statementMatch[0].indexOf(body);
+    for (const part of splitTopLevelArguments(body)) {
+      const nameMatch = /&?\s*([A-Za-z_]\w*)/.exec(part.trim());
+      if (!nameMatch) {
+        continue;
+      }
+      const relative = body.indexOf(part);
+      const offset = bodyOffset + Math.max(0, relative) + nameMatch.index;
+      declarations.push({
+        name: nameMatch[1],
+        typeName,
+        offset,
+        scopeChain: scopeChainAt(blocks, statementMatch.index),
+      });
+    }
+  }
+
+  // Function parameters belong to the function body's scope, not file scope.
+  const functionPattern =
+    /\b(?:function|method)\s+[A-Za-z_]\w*\s*\(([\s\S]*?)\)\s*(?:[A-Za-z_]\w*)?\s*\{/g;
+  let functionMatch: RegExpExecArray | null;
+  while ((functionMatch = functionPattern.exec(cleanText)) !== null) {
+    const params = functionMatch[1];
+    const bodyStart = functionMatch.index + functionMatch[0].lastIndexOf("{");
+    for (const param of splitTopLevelArguments(params)) {
+      const paramMatch = new RegExp(
+        `^\\s*(${typePattern})\\s*&?\\s*([A-Za-z_]\\w*)`,
+        "i"
+      ).exec(param);
+      if (!paramMatch) {
+        continue;
+      }
+      declarations.push({
+        name: paramMatch[2],
+        typeName: paramMatch[1].toLowerCase(),
+        offset: bodyStart,
+        scopeChain: scopeChainAt(blocks, bodyStart + 1),
+      });
+    }
+  }
+
+  return declarations;
+}
+
+function resolveDeclaredType(
+  declarations: TypedDeclaration[],
+  blocks: BraceBlock[],
+  name: string,
+  useOffset: number
+): string | undefined {
+  const useScope = scopeChainAt(blocks, useOffset);
+  const visible = declarations.filter((declaration) => {
+    if (declaration.name !== name || declaration.offset > useOffset) {
+      return false;
+    }
+    return declaration.scopeChain.every(
+      (scope, index) => useScope[index] === scope
+    );
+  });
+  visible.sort((left, right) =>
+    right.scopeChain.length - left.scopeChain.length || right.offset - left.offset
+  );
+  return visible[0]?.typeName;
+}
+
 /**
  * Check for `.GetLength()`, `.Find()`, etc. called on identifiers whose
  * declared type is `variable` (or another non-string type).
@@ -2197,27 +2406,8 @@ function checkStringMemberOnWrongType(
 ): void {
   const fullText = document.getText();
   const cleanText = buildMaskedText(fullText, ignoredRanges);
-
-  // ── Phase 1: collect declared identifiers and their types ─────────
-  // Matches: `type  name`, `type& name`, `type  name[]`, including
-  //          multi-declarations like `variable a, b, c;`
-  const declaredTypes = new Map<string, string>(); // identifier → type
-
-  const declPattern =
-    /\b(variable|string|sequence|device|object|timer|event|file|resource|dialog)\s*(&?)\s+([A-Za-z_]\w*)/g;
-  let declMatch: RegExpExecArray | null;
-  while ((declMatch = declPattern.exec(cleanText)) !== null) {
-    const typeName = declMatch[1].toLowerCase();
-    const ident = declMatch[3];
-    // Don't overwrite -- first declaration wins (most common scope)
-    if (!declaredTypes.has(ident)) {
-      declaredTypes.set(ident, typeName);
-    }
-  }
-
-  // Also handle function parameter lists -- they produce declarations too.
-  // The regex above already captures `variable i_strFoo` inside parameter
-  // lists, so this is covered.
+  const blocks = collectBraceBlocks(cleanText);
+  const declarations = collectTypedDeclarations(cleanText);
 
   // ── Phase 2: find method calls on identifiers ─────────────────────
   const methodCallPattern =
@@ -2232,7 +2422,12 @@ function checkStringMemberOnWrongType(
       continue;
     }
 
-    const declaredType = declaredTypes.get(receiverName);
+    const declaredType = resolveDeclaredType(
+      declarations,
+      blocks,
+      receiverName,
+      mcMatch.index
+    );
     if (!declaredType) {
       // Type unknown -- could be from an included library; skip.
       continue;
@@ -2409,96 +2604,45 @@ function checkStringConcatenation(
 ): void {
   const fullText = document.getText();
   const cleanText = buildMaskedText(fullText, ignoredRanges);
+  const blocks = collectBraceBlocks(cleanText);
+  const declarations = collectTypedDeclarations(cleanText);
+  const candidates: Array<{ name: string; offset: number }> = [];
 
-  // Phase 1: collect identifiers declared as `string`
-  const stringVars = new Set<string>();
-  const declPattern = /\bstring\s*(&?)\s+([A-Za-z_]\w*)/g;
-  let declMatch: RegExpExecArray | null;
-  while ((declMatch = declPattern.exec(cleanText)) !== null) {
-    stringVars.add(declMatch[2]);
+  let match: RegExpExecArray | null;
+  const beforePlus = /\b([A-Za-z_]\w*)\s*\+(?!=|\+)/g;
+  while ((match = beforePlus.exec(cleanText)) !== null) {
+    candidates.push({ name: match[1], offset: match.index });
+  }
+  const afterPlus = /\+(?![+=])\s*\b([A-Za-z_]\w*)\b/g;
+  while ((match = afterPlus.exec(cleanText)) !== null) {
+    candidates.push({
+      name: match[1],
+      offset: match.index + match[0].lastIndexOf(match[1]),
+    });
   }
 
-  if (stringVars.size === 0) {
-    return;
-  }
-
-  // Phase 2: scan for `identifier + expr` or `expr + identifier`
-  // where the identifier is a string-typed variable.
-  // We look for  `stringVar +`  or  `+ stringVar`  patterns.
-  for (const varName of stringVars) {
-    // Pattern: stringVar followed by +  (but not inside a .Method() call)
-    // Escape varName for regex (it's always an identifier so safe)
-    const patternStr = `\\b${varName}\\s*\\+(?!=)`;
-    const patternPlus = new RegExp(patternStr, "g");
-    let m: RegExpExecArray | null;
-    while ((m = patternPlus.exec(cleanText)) !== null) {
-      // Skip if inside ignored range
-      if (isInsideIgnoredRange(m.index, ignoredRanges)) {
-        continue;
-      }
-      // Skip if this is inside a function parameter list (declaration context)
-      if (isLikelyDeclarationContext(cleanText, m.index)) {
-        continue;
-      }
-      const linePos = document.positionAt(m.index);
-      const range = new vscode.Range(
-        linePos.line,
-        linePos.character,
-        linePos.line,
-        linePos.character + varName.length
-      );
-      const diag = new vscode.Diagnostic(
-        range,
-        `The '+' concatenation operator does not work with 'string' type. ` +
-          `'${varName}' is declared as 'string'. Use a 'variable' for concatenation, ` +
-          `then assign to 'string' when you need member functions like .Find() or .GetLength().`,
-        vscode.DiagnosticSeverity.Error
-      );
-      diag.source = "hsl";
-      diag.code = "string-concat-with-plus";
-      diagnostics.push(diag);
+  const flagged = new Set<number>();
+  for (const candidate of candidates) {
+    if (
+      flagged.has(candidate.offset) ||
+      resolveDeclaredType(declarations, blocks, candidate.name, candidate.offset) !== "string"
+    ) {
+      continue;
     }
-
-    // Pattern: + followed by stringVar
-    const patternPre = new RegExp(`\\+\\s*\\b${varName}\\b`, "g");
-    while ((m = patternPre.exec(cleanText)) !== null) {
-      if (isInsideIgnoredRange(m.index, ignoredRanges)) {
-        continue;
-      }
-      if (isLikelyDeclarationContext(cleanText, m.index)) {
-        continue;
-      }
-      // Find the position of the variable name within the match
-      const varOffset = m[0].indexOf(varName);
-      const absOffset = m.index + varOffset;
-      const linePos = document.positionAt(absOffset);
-      const range = new vscode.Range(
-        linePos.line,
-        linePos.character,
-        linePos.line,
-        linePos.character + varName.length
-      );
-      // Avoid duplicate diagnostics if we already flagged the same location
-      const isDuplicate = diagnostics.some(
-        (d) =>
-          d.code === "string-concat-with-plus" &&
-          d.range.start.line === range.start.line &&
-          d.range.start.character === range.start.character
-      );
-      if (isDuplicate) {
-        continue;
-      }
-      const diag = new vscode.Diagnostic(
-        range,
-        `The '+' concatenation operator does not work with 'string' type. ` +
-          `'${varName}' is declared as 'string'. Use a 'variable' for concatenation, ` +
-          `then assign to 'string' when you need member functions like .Find() or .GetLength().`,
-        vscode.DiagnosticSeverity.Error
-      );
-      diag.source = "hsl";
-      diag.code = "string-concat-with-plus";
-      diagnostics.push(diag);
-    }
+    flagged.add(candidate.offset);
+    const start = document.positionAt(candidate.offset);
+    const range = new vscode.Range(
+      start,
+      document.positionAt(candidate.offset + candidate.name.length)
+    );
+    const diag = new vscode.Diagnostic(
+      range,
+      `The '+' operator does not work with HSL 'string' values. Use a 'variable' for concatenation, then assign to 'string' when string member functions are needed.`,
+      vscode.DiagnosticSeverity.Error
+    );
+    diag.source = "hsl";
+    diag.code = "string-concat-with-plus";
+    diagnostics.push(diag);
   }
 }
 

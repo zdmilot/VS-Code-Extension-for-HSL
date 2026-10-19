@@ -90,11 +90,13 @@ The `TokenType` enum defines all recognized token types:
 | `CONST` | `const` | `IF` | `if` |
 | `ELSE` | `else` | `FOR` | `for` |
 | `WHILE` | `while` | `BREAK` | `break` |
-| `CONTINUE` | `continue` | `RETURN` | `return` |
+| `LOCK` | `lock` | `UNLOCK` | `unlock` |
 | `ABORT` | `abort` | `PAUSE` | `pause` |
 | `ONERROR` | `onerror` | `GOTO` | `goto` |
 | `RESUME` | `resume` | `NEXT` | `next` |
 | `SCHEDULERONLY` | `scheduleronly` | `EXECUTORONLY` | `executoronly` |
+| `SYNCHRONIZED` | `synchronized` | `WORKFLOW` | `workflow` |
+| `ACTIVITY` | `activity` | `ACTIONBLOCK` | `actionblock` |
 
 ### Operators
 

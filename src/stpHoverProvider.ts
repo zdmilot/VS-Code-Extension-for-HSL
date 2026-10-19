@@ -666,7 +666,8 @@ export function registerStpHoverProvider(
 /**
  * Find the .stp file for a given .hsl file.
  * Looks for a file with the same base name but .stp extension in the same directory.
- * Also checks for .stp files matching the method name from #include "*.res" patterns.
+ * If the direct match is absent, accepts a fallback only when exactly one
+ * .stp file exists in the directory. Ambiguous matches are never guessed.
  */
 function findStpFile(hslPath: string): string | undefined {
   const dir = path.dirname(hslPath);
@@ -680,11 +681,11 @@ function findStpFile(hslPath: string): string | undefined {
 
   // Try to find .stp files in the same directory
   try {
-    const files = fs.readdirSync(dir);
-    for (const file of files) {
-      if (file.toLowerCase().endsWith(".stp")) {
-        return path.join(dir, file);
-      }
+    const candidates = fs
+      .readdirSync(dir)
+      .filter((file) => file.toLowerCase().endsWith(".stp"));
+    if (candidates.length === 1) {
+      return path.join(dir, candidates[0]);
     }
   } catch {
     // ignore

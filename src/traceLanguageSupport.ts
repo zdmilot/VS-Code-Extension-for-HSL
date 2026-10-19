@@ -50,10 +50,18 @@ class FirmwareRegistry {
 
   private _load(jsonPath: string): void {
     if (!fs.existsSync(jsonPath)) {
+      console.warn(`HSL firmware command registry was not found at ${jsonPath}`);
       return;
     }
-    const raw = fs.readFileSync(jsonPath, "utf-8");
-    const data: FirmwareCommandsFile = JSON.parse(raw);
+    let data: FirmwareCommandsFile;
+    try {
+      const raw = fs.readFileSync(jsonPath, "utf-8");
+      data = JSON.parse(raw) as FirmwareCommandsFile;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Unable to load HSL firmware command registry: ${message}`);
+      return;
+    }
 
     this._errorCodes = data.errorCodes ?? {};
 
@@ -96,7 +104,6 @@ class FirmwareRegistry {
 
 function buildCommandHover(cmd: FirmwareCommandDef): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
-  md.isTrusted = true;
 
   md.appendMarkdown(`### Firmware Command \`${cmd.code}\`\n\n`);
   md.appendMarkdown(`**${cmd.description}**\n\n`);
@@ -311,7 +318,6 @@ class TraceHoverProvider implements vscode.HoverProvider {
       const word = document.getText(wordRange);
       if (STEP_TYPES.has(word)) {
         const md = new vscode.MarkdownString();
-        md.isTrusted = true;
         md.appendMarkdown(`### HSL Device Step: \`${word}\`\n\n`);
         md.appendMarkdown(`Hamilton ML STAR device step type.\n`);
 
@@ -336,7 +342,6 @@ class TraceHoverProvider implements vscode.HoverProvider {
         const stepType = CLSID_TO_STEP[clsidText];
         if (stepType) {
           const md = new vscode.MarkdownString();
-          md.isTrusted = true;
           md.appendMarkdown(`### CLSID: \`${stepType}\`\n\n`);
           md.appendMarkdown(`Device step CLSID for **${stepType}** operation.\n`);
           return new vscode.Hover(md, clsidRange);

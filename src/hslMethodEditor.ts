@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { randomBytes } from "crypto";
 
 // ─── Step CLSID → human-readable names ──────────────────────────────────────────
 const STEP_NAMES: Record<string, { name: string; icon: string; color: string }> = {
@@ -116,7 +117,7 @@ function parseHslDocument(text: string): ParsedStep[] {
     }
 
     // Control flow: if, while, for, loop
-    if (/^\s*(if|else|while|for|loop|switch|case)\b/.test(line)) {
+    if (/^\s*(if|else|while|for|loop)\b/.test(line)) {
       steps.push({
         line: i + 1,
         type: "control-flow",
@@ -135,14 +136,19 @@ function parseHslDocument(text: string): ParsedStep[] {
   return steps;
 }
 
-function getWebviewContent(steps: ParsedStep[], docName: string): string {
+function getWebviewContent(
+  webview: vscode.Webview,
+  steps: ParsedStep[],
+  docName: string
+): string {
+  const nonce = randomBytes(16).toString("base64");
   const stepsHtml = steps
     .map((step) => {
       switch (step.type) {
         case "include":
           return `<div class="step include" data-line="${step.line}">
             <span class="step-icon">📂</span>
-            <span class="step-label">#include "${step.text}"</span>
+            <span class="step-label">#include "${escapeHtml(step.text)}"</span>
             <span class="step-line">L${step.line}</span>
           </div>`;
 
@@ -212,6 +218,7 @@ function getWebviewContent(steps: ParsedStep[], docName: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Hamilton HSL Method Editor</title>
@@ -434,7 +441,7 @@ function getWebviewContent(steps: ParsedStep[], docName: string): string {
     ${stepsHtml || '<div class="empty-state"><div class="icon">📄</div><p>No steps found in this file.</p></div>'}
   </div>
 
-  <script>
+  <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
 
     // Click step → navigate to line in text editor
@@ -490,7 +497,7 @@ export class HslMethodEditorProvider implements vscode.CustomTextEditorProvider 
     const updateWebview = (): void => {
       const steps = parseHslDocument(document.getText());
       const docName = document.fileName.split(/[\\/]/).pop() ?? document.fileName;
-      webviewPanel.webview.html = getWebviewContent(steps, docName);
+      webviewPanel.webview.html = getWebviewContent(webviewPanel.webview, steps, docName);
     };
 
     updateWebview();
@@ -501,20 +508,30 @@ export class HslMethodEditorProvider implements vscode.CustomTextEditorProvider 
       }
     });
 
-    webviewPanel.onDidDispose(() => {
-      changeDocSub.dispose();
+    const messageSub = webviewPanel.webview.onDidReceiveMessage((message: unknown) => {
+      if (
+        typeof message !== "object" ||
+        message === null ||
+        !("type" in message) ||
+        !("line" in message) ||
+        message.type !== "goto" ||
+        typeof message.line !== "number" ||
+        !Number.isInteger(message.line) ||
+        message.line < 1 ||
+        message.line > document.lineCount
+      ) {
+        return;
+      }
+      void vscode.window.showTextDocument(document.uri, {
+        viewColumn: vscode.ViewColumn.Beside,
+        selection: new vscode.Range(message.line - 1, 0, message.line - 1, 0),
+        preserveFocus: false,
+      });
     });
 
-    webviewPanel.webview.onDidReceiveMessage((message) => {
-      if (message.type === "goto") {
-        const line = message.line as number;
-        // Open the file in the default text editor and go to the line
-        vscode.window.showTextDocument(document.uri, {
-          viewColumn: vscode.ViewColumn.Beside,
-          selection: new vscode.Range(line - 1, 0, line - 1, 0),
-          preserveFocus: false,
-        });
-      }
+    webviewPanel.onDidDispose(() => {
+      changeDocSub.dispose();
+      messageSub.dispose();
     });
   }
 }
