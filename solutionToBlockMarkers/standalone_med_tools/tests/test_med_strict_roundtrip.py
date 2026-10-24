@@ -344,7 +344,7 @@ class StpReviewRegressionTests(unittest.TestCase):
                 self.assertIsInstance(caught.exception.__cause__, ValueError)
                 med_sync.assert_called_once_with(str(hsl), str(med))
                 writer.assert_not_called()
-                checksums.assert_not_called()
+                checksums.assert_called_once_with(str(hsl))
             self.assertEqual(original, stp.read_bytes())
             self.assertEqual([], list(Path(folder).glob('*.sync_*.txt')))
 

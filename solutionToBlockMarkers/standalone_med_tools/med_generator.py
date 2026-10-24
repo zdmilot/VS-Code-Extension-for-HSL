@@ -2205,9 +2205,9 @@ def correct_block_markers_on_save(file_path: str) -> None:
     1. Reconciles block marker headers with actual code
     2. Applies cross-file row numbering
     3. Writes corrected content back to disk (only if changed)
-    4. Re-syncs the companion .med from the corrected .hsl + .sub
-    5. Re-syncs the companion .stp for device steps
-    6. Updates checksums on .hsl and .sub text files
+    4. Updates checksums on .hsl and .sub text files
+    5. Re-syncs the companion .med from the corrected .hsl + .sub
+    6. Re-syncs the companion .stp for device steps
 
     Args:
         file_path: Path to the saved .hsl or .sub file.
@@ -2215,6 +2215,8 @@ def correct_block_markers_on_save(file_path: str) -> None:
     Raises:
         OSError: If .med or .stp sync fails (propagated for caller to report).
             The .med may already have been updated when a later .stp sync fails.
+            Text checksums are updated first; the companion files are not one
+            atomic transaction. Checksum update errors are logged.
     """
     # Guard 1: must be .hsl or .sub
     is_hsl = file_path.lower().endswith(".hsl")
@@ -2325,6 +2327,15 @@ def correct_block_markers_on_save(file_path: str) -> None:
                 except OSError:
                     pass
 
+    # Text edits have already happened. Finalize their checksums before a
+    # binary companion failure can interrupt the remaining sync operations.
+    for f in (hsl_path, sub_path):
+        if os.path.exists(f):
+            try:
+                update_checksum_in_file(f)
+            except (ValueError, OSError) as e:
+                logger.error("Checksum update failed for %s: %s", os.path.basename(f), e)
+
     # Step 3: Sync .med
     if has_med:
         try:
@@ -2343,17 +2354,6 @@ def correct_block_markers_on_save(file_path: str) -> None:
             ".stp sync failed for %s: %s", os.path.basename(hsl_path), e
         )
         raise OSError(f".stp sync failed: {e}") from e
-
-    # Step 5: Update checksums on text companion files (.hsl, .sub only)
-    for f in (hsl_path, sub_path):
-        if os.path.exists(f):
-            try:
-                update_checksum_in_file(f)
-            except (ValueError, OSError) as e:
-                logger.error(
-                    "Checksum update failed for %s: %s", os.path.basename(f), e
-                )
-
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # CLI Entry Point
