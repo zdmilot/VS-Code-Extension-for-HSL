@@ -924,7 +924,7 @@ def binary_to_text_file(input_path: Path, output_path: Path) -> None:
         output_path: Path where the text output will be written.
     """
     import subprocess
-    converter = Path(r"C:\Program Files (x86)\Hamilton\7 - Created Utilities and Scripts\Programatic Method and Venus File Generation Playground\tooling\Hamilton-Binary-ASCII-Converter\Hamilton-Binary-ASCII-Converter.exe")
+    converter = Path(r"C:\Program Files (x86)\Hamilton\Tools and Utilities\Programatic Method and Venus File Generation Playground\tooling\Hamilton-Binary-ASCII-Converter\Hamilton-Binary-ASCII-Converter.exe")
     if not converter.exists():
         raise FileNotFoundError(f"Converter not found at {converter}")
     
@@ -939,7 +939,7 @@ def text_to_binary_file(input_path: Path, output_path: Path) -> None:
         output_path: Path where the binary output will be written.
     """
     import subprocess
-    converter = Path(r"C:\Program Files (x86)\Hamilton\7 - Created Utilities and Scripts\Programatic Method and Venus File Generation Playground\tooling\Hamilton-Binary-ASCII-Converter\Hamilton-Binary-ASCII-Converter.exe")
+    converter = Path(r"C:\Program Files (x86)\Hamilton\Tools and Utilities\Programatic Method and Venus File Generation Playground\tooling\Hamilton-Binary-ASCII-Converter\Hamilton-Binary-ASCII-Converter.exe")
     if not converter.exists():
         raise FileNotFoundError(f"Converter not found at {converter}")
     

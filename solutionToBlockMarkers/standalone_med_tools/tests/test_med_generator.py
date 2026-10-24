@@ -384,7 +384,7 @@ class TestExtractActivityDataRoundtrip(unittest.TestCase):
     """Round-trip test: build → write → extract preserves step count.
 
     These tests touch the filesystem and require the codec to be functional.
-    They are skipped if the codec raises during conversion.
+    They are skipped only when the required converter executable is absent.
     """
 
     def test_extract_activity_data_roundtrip(self):
@@ -410,7 +410,7 @@ class TestExtractActivityDataRoundtrip(unittest.TestCase):
         self.assertIn("AAAA", med_text)
         self.assertIn("guid_rt_001", med_text)
 
-        # Attempt binary round-trip (may fail if codec has issues)
+        # Conversion and assertion failures must remain visible as test failures.
         try:
             from standalone_med_tools.hxcfgfile_codec import text_to_binary_file
 
@@ -426,8 +426,10 @@ class TestExtractActivityDataRoundtrip(unittest.TestCase):
 
                 activity = extract_activity_data_from_med(bin_path)
                 self.assertEqual(activity, "AAAA")
-        except Exception as exc:
-            self.skipTest(f"Codec round-trip not available: {exc}")
+        except FileNotFoundError as exc:
+            if str(exc).startswith("Converter not found at "):
+                self.skipTest(f"Codec round-trip not available: {exc}")
+            raise
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -469,8 +471,10 @@ class TestSyncMedFromHsl(unittest.TestCase):
                 )
                 # The generated file should have non-trivial size
                 self.assertGreater(os.path.getsize(med_path), 0)
-        except Exception as exc:
-            self.skipTest(f"sync_med_from_hsl not runnable in test env: {exc}")
+        except FileNotFoundError as exc:
+            if str(exc).startswith("Converter not found at "):
+                self.skipTest(f"sync_med_from_hsl not runnable in test env: {exc}")
+            raise
 
 
 # ═════════════════════════════════════════════════════════════════════════════

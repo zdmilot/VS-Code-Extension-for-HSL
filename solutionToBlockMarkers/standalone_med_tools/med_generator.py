@@ -1111,7 +1111,14 @@ def build_device_step_stub(step: HslStepRecord) -> str:
     lines.append('")"')
     lines.append("];")
 
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
+
+
+def _format_hxpars_section(lines: List[str]) -> str:
+    """Vendor text grammar requires a comma between every HxPars token."""
+    if len(lines) < 4 or lines[1] != "[" or lines[-1] != "];":
+        raise ValueError("Expected one complete generated HxPars section")
+    return "\r\n".join(lines[:2]) + "\r\n" + ",\r\n".join(lines[2:-1]) + "\r\n];"
 
 
 def build_step_section(step: HslStepRecord) -> str:
@@ -1317,7 +1324,7 @@ def build_step_section(step: HslStepRecord) -> str:
     lines.append('")"')
     lines.append("];")
 
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -1369,7 +1376,7 @@ def _build_hx_met_ed_data(
 
     lines.append('")"')
     lines.append("];")
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
 
 
 def _build_main_definition() -> str:
@@ -1378,7 +1385,7 @@ def _build_main_definition() -> str:
     Returns:
         Complete ``HxMetEd_MainDefinition`` section text.
     """
-    return "\r\n".join([
+    return _format_hxpars_section([
         "DataDef,HxPars,3,HxMetEd_MainDefinition,",
         "[",
         '"3-533725173"',
@@ -1461,7 +1468,7 @@ def _build_submethods_section(submethods: List[SubmethodInfo]) -> str:
     lines.append('")"')
     lines.append("];")
 
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -1745,7 +1752,7 @@ def build_default_stp_section(guid: str, clsid: str, code: str) -> str:
     lines.append('")"')
     lines.append("];")
 
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
 
 
 def _parse_existing_stp_sections(stp_text: str) -> Dict[str, str]:
