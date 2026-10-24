@@ -675,7 +675,10 @@ def parse_binary_med(binary_data: bytes) -> HxCfgTextModel:
 def build_text_med(model: HxCfgTextModel) -> str:
     """Build the textual HxCfgFile representation from a model.
 
-    The output mirrors what ``HxCfgFilConverter.exe /t`` produces:
+    The output preserves the model's decoded token values, with the following
+    structure. Formatting and escape spelling can differ from the native
+    converter (for example, byte escapes versus TAB escapes or raw Latin-1).
+    Semantic token equivalence does not imply native text or byte identity:
 
     1. A fixed header (``HxCfgFile,3;`` + ``ConfigIsValid,Y;``).
     2. An optional ``DataDef`` block for the named section.

@@ -293,7 +293,10 @@ def _safe_unlink(file_path: str) -> None:
 def _escape_string(s: str) -> str:
     """Escape a string for inclusion inside a quoted .med/.stp token.
 
-    Backslashes, double quotes, and newlines are escaped.
+    Backslashes, double quotes, and newlines are escaped. Other Latin-1
+    characters retain their literal spelling. Native converter regressions
+    verify raw TAB, byte 0x01, and accented Latin-1 characters through populated
+    step builders and HSL-to-MED sync; this does not validate HSL execution.
 
     Args:
         s: Raw string value.

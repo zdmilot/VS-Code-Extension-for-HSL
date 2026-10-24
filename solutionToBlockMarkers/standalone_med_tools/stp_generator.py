@@ -395,6 +395,8 @@ def build_default_stp_section(guid: str, clsid: str, code: str) -> str:
         >>> '"3AlwaysInitialize"' in section
         True
     """
+    from .med_generator import _escape_string
+
     bare = bare_clsid(clsid)
     step_name = DEVICE_STEP_NAMES.get(bare, "Unknown")
     lines: List[str] = []
@@ -404,7 +406,7 @@ def build_default_stp_section(guid: str, clsid: str, code: str) -> str:
 
     # CommandStepFileGuid -- usually same as instance GUID for simple steps
     lines.append('"1CommandStepFileGuid"')
-    lines.append(f'"{guid}"')
+    lines.append(f'"{_escape_string(guid)}"')
 
     # Try to extract sequence name from code for steps that use sequences
     seq_m = re.search(r'ML_STAR\.(\w+)', code)
