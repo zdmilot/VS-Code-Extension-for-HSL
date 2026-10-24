@@ -304,6 +304,7 @@ def _escape_string(s: str) -> str:
         s.replace("\\", "\\\\")
         .replace('"', '\\"')
         .replace("\r\n", "\\r\\n")
+        .replace("\r", "\\r")
         .replace("\n", "\\n")
     )
 
@@ -974,7 +975,7 @@ def _append_step_specific_fields(lines: List[str], clsid: str, code: str) -> Non
         lines.append('"1"')
         lines.append('"1Result"')
         asn = parse_assignment(code)
-        lines.append(f'"{asn["variable"]}"')
+        lines.append(f'"{_escape_string(asn["variable"])}"')
 
     elif bare == STEP_CLSID["Loop"]:
         loop_info = parse_loop_code(code)
@@ -983,18 +984,18 @@ def _append_step_specific_fields(lines: List[str], clsid: str, code: str) -> Non
         lines.append('"1LeftComparisonValue"')
         lines.append('""')
         lines.append('"1LoopCounter"')
-        lines.append(f'"{loop_info["counter"]}"')
+        lines.append(f'"{_escape_string(loop_info["counter"])}"')
         lines.append('"3NbrOfIterations"')
-        lines.append(f'"{loop_info["iterations"]}"')
+        lines.append(f'"{_escape_string(loop_info["iterations"])}"')
 
     elif bare in (STEP_CLSID["SingleLibFunction"], STEP_CLSID["SubmethodCall"]):
         call_info = parse_function_call_code(code)
         is_submethod = bare == STEP_CLSID["SubmethodCall"]
 
         lines.append('"1ReturnValue"')
-        lines.append(f'"{call_info.return_var}"')
+        lines.append(f'"{_escape_string(call_info.return_var)}"')
         lines.append('"1FunctionName"')
-        lines.append(f'"{call_info.function_name}"')
+        lines.append(f'"{_escape_string(call_info.function_name)}"')
         lines.append('"3FieldCount"')
         lines.append(f'"{len(call_info.args)}"')
 
@@ -1033,28 +1034,28 @@ def _append_step_specific_fields(lines: List[str], clsid: str, code: str) -> Non
         lines.append(f'"{value_prefix}ValueToSet"')
         lines.append(f'"{_escape_string(arr_info.value)}"')
         lines.append('"1ArrayName"')
-        lines.append(f'"{arr_info.array_name}"')
+        lines.append(f'"{_escape_string(arr_info.array_name)}"')
 
     elif bare == STEP_CLSID["ArrayDeclare"]:
         arr_info = parse_array_method_call(code)
         lines.append('"1NewSize"')
-        lines.append(f'"{arr_info.value or ""}"')
+        lines.append(f'"{_escape_string(arr_info.value or "")}"')
         lines.append('"1ArrayName"')
-        lines.append(f'"{arr_info.array_name}"')
+        lines.append(f'"{_escape_string(arr_info.array_name)}"')
 
     elif bare == STEP_CLSID["ArrayGetAt"]:
         arr_info = parse_array_method_call(code)
         lines.append('"1ArrayName"')
-        lines.append(f'"{arr_info.array_name}"')
+        lines.append(f'"{_escape_string(arr_info.array_name)}"')
         lines.append('"1Result"')
-        lines.append(f'"{arr_info.return_var}"')
+        lines.append(f'"{_escape_string(arr_info.return_var)}"')
 
     elif bare == STEP_CLSID["ArrayGetSize"]:
         arr_info = parse_array_method_call(code)
         lines.append('"1ArrayName"')
-        lines.append(f'"{arr_info.array_name}"')
+        lines.append(f'"{_escape_string(arr_info.array_name)}"')
         lines.append('"1Result"')
-        lines.append(f'"{arr_info.return_var}"')
+        lines.append(f'"{_escape_string(arr_info.return_var)}"')
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -1116,8 +1117,13 @@ def build_device_step_stub(step: HslStepRecord) -> str:
 
 def _format_hxpars_section(lines: List[str]) -> str:
     """Vendor text grammar requires a comma between every HxPars token."""
-    if len(lines) < 4 or lines[1] != "[" or lines[-1] != "];":
+    if (not isinstance(lines, list) or len(lines) < 4 or lines[1] != "[" or lines[-1] != "];"
+            or not isinstance(lines[0], str)
+            or not re.fullmatch(r'DataDef,HxPars,3,[^,\r\n\[\]"]+,', lines[0])):
         raise ValueError("Expected one complete generated HxPars section")
+    if any(not isinstance(token, str) or not re.fullmatch(r'"(?:[^"\\\r\n]|\\["\\rnt])*"', token)
+           for token in lines[2:-1]):
+        raise ValueError("Expected individually quoted, escaped HxPars tokens without separators")
     return "\r\n".join(lines[:2]) + "\r\n" + ",\r\n".join(lines[2:-1]) + "\r\n];"
 
 
@@ -1217,7 +1223,7 @@ def build_step_section(step: HslStepRecord) -> str:
 
         # Container -533921792: FunctionName
         lines.append('"(-533921792"')
-        lines.append(f'"({call_info.function_name}"')
+        lines.append(f'"({_escape_string(call_info.function_name)}"')
         lines.append('"(0"')
         lines.append('"10"')
         lines.append('"FunctionName"')
@@ -1236,7 +1242,7 @@ def build_step_section(step: HslStepRecord) -> str:
             lines.append('"(-534118398"')
             for i, arg in enumerate(call_info.args):
                 if not arg.startswith('"') and not re.match(r'^\d+(\.\d+)?$', arg):
-                    lines.append(f'"({arg}"')
+                    lines.append(f'"({_escape_string(arg)}"')
                     lines.append('"(0"')
                     lines.append('"10"')
                     lines.append('"ParamValue"')
@@ -1245,7 +1251,7 @@ def build_step_section(step: HslStepRecord) -> str:
                     lines.append('")"')
                     lines.append('")"')
             if has_return:
-                lines.append(f'"({call_info.return_var}"')
+                lines.append(f'"({_escape_string(call_info.return_var)}"')
                 lines.append('"(0"')
                 lines.append('"10"')
                 lines.append('"ReturnValue"')
@@ -1264,7 +1270,7 @@ def build_step_section(step: HslStepRecord) -> str:
             # ArraySetAt: Index field comes after Timestamp
             if is_array_set_at:
                 lines.append('"1Index"')
-                lines.append(f'"{arr_info.index}"')
+                lines.append(f'"{_escape_string(arr_info.index)}"')
 
             # ArrayDeclare: ArrayTypeCommandKey comes BEFORE Variables
             if is_array_declare:
@@ -1281,7 +1287,7 @@ def build_step_section(step: HslStepRecord) -> str:
                 and not re.match(r'^-?\d+(\.\d+)?$', arr_info.value)
             ):
                 lines.append('"(-534118398"')
-                lines.append(f'"({arr_info.value}"')
+                lines.append(f'"({_escape_string(arr_info.value)}"')
                 lines.append('"(0"')
                 lines.append('"10"')
                 lines.append('"ValueToSet"')
@@ -1291,7 +1297,7 @@ def build_step_section(step: HslStepRecord) -> str:
 
             # ArrayName container
             lines.append('"(-534118349"')
-            lines.append(f'"({arr_info.array_name}"')
+            lines.append(f'"({_escape_string(arr_info.array_name)}"')
             lines.append('"(0"')
             lines.append('"10"')
             lines.append('"ArrayName"')
@@ -1312,10 +1318,10 @@ def build_step_section(step: HslStepRecord) -> str:
                 lines.append('"(Variables"')
                 lines.append('"(-534118398"')
                 for v in var_refs:
-                    lines.append(f'"({v.name}"')
+                    lines.append(f'"({_escape_string(v.name)}"')
                     lines.append('"(0"')
                     lines.append('"10"')
-                    lines.append(f'"{v.role}"')
+                    lines.append(f'"{_escape_string(v.role)}"')
                     lines.append('")"')
                     lines.append('")"')
                 lines.append('")"')
@@ -1370,7 +1376,7 @@ def _build_hx_met_ed_data(
     if devices:
         lines.append('"(-533725183"')
         for dev in devices:
-            lines.append(f'"3{dev.name}"')
+            lines.append(f'"3{_escape_string(dev.name)}"')
             lines.append('"1"')
         lines.append('")"')
 
@@ -1438,7 +1444,7 @@ def _build_submethods_section(submethods: List[SubmethodInfo]) -> str:
             lines.append('"1-533725167"')
             lines.append('""')
             lines.append('"1-533725168"')
-            lines.append(f'"{p["name"]}"')
+            lines.append(f'"{_escape_string(p["name"])}"')
             lines.append('")"')
 
         lines.append('")"')
@@ -1447,7 +1453,7 @@ def _build_submethods_section(submethods: List[SubmethodInfo]) -> str:
         lines.append('"3-533725171"')
         lines.append('"0"')
         lines.append('"1-533725161"')
-        lines.append(f'"{sm.name}"')
+        lines.append(f'"{_escape_string(sm.name)}"')
         lines.append('"3-533725172"')
         lines.append(f'"{1 if sm.builtin else 0}"')
         lines.append('")"')
@@ -1681,7 +1687,7 @@ def build_default_stp_section(guid: str, clsid: str, code: str) -> str:
     lines.append("[")
 
     lines.append('"1CommandStepFileGuid"')
-    lines.append(f'"{guid}"')
+    lines.append(f'"{_escape_string(guid)}"')
 
     # Try to extract sequence name from code
     seq_m = re.search(r'ML_STAR\.(\w+)', code)
