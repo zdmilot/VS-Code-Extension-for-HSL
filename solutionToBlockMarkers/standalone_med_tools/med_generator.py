@@ -77,6 +77,7 @@ from .block_markers import (
     generate_instance_guid,
 )
 from .checksum import (
+    RE_CHECKSUM_LINE,
     compute_hsl_checksum,
     generate_checksum_line,
     update_checksum_in_file,
@@ -1794,11 +1795,21 @@ def _parse_existing_stp_sections(stp_text: str) -> Dict[str, str]:
                 position += 1
         raise ValueError("Unterminated quoted token in existing STP section")
 
+    cursor = whitespace(cursor)
+    if stp_text.startswith("HxCfgFile,3;", cursor):
+        cursor = whitespace(cursor + len("HxCfgFile,3;"))
+        if not stp_text.startswith("ConfigIsValid,Y;", cursor):
+            raise ValueError("Unsupported existing STP configuration header")
+        cursor = whitespace(cursor + len("ConfigIsValid,Y;"))
     while True:
-        marker = re.search(r'\bDataDef\b', stp_text[cursor:])
-        if marker is None:
+        cursor = whitespace(cursor)
+        if cursor == len(stp_text):
             break
-        start = cursor + marker.start()
+        if stp_text.startswith('*', cursor) and RE_CHECKSUM_LINE.fullmatch(stp_text[cursor:].strip()):
+            break
+        # Do not search past damaged text to a later header: that silently drops
+        # content. Only whitespace or the terminal checksum may separate blocks.
+        start = cursor
         header = re.match(r'DataDef,HxPars,3,([^,\s\[\]"{}]+),\s*\[', stp_text[start:])
         properties = re.match(r'DataDef,Method,1,Properties,\s*\{', stp_text[start:])
         if header:
@@ -2202,7 +2213,8 @@ def correct_block_markers_on_save(file_path: str) -> None:
         file_path: Path to the saved .hsl or .sub file.
 
     Raises:
-        OSError: If .med sync fails (propagated for caller to report).
+        OSError: If .med or .stp sync fails (propagated for caller to report).
+            The .med may already have been updated when a later .stp sync fails.
     """
     # Guard 1: must be .hsl or .sub
     is_hsl = file_path.lower().endswith(".hsl")
@@ -2330,7 +2342,7 @@ def correct_block_markers_on_save(file_path: str) -> None:
         logger.error(
             ".stp sync failed for %s: %s", os.path.basename(hsl_path), e
         )
-        # Non-fatal
+        raise OSError(f".stp sync failed: {e}") from e
 
     # Step 5: Update checksums on text companion files (.hsl, .sub only)
     for f in (hsl_path, sub_path):

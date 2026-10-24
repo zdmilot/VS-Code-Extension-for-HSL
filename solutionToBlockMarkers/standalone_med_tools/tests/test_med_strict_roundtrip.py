@@ -71,6 +71,24 @@ def container_text(section):
     return content + generate_checksum_line(content, author='offline-fixture', valid=0, prefix_char='*') + '\r\n'
 
 
+def minimal_stp_text(section=''):
+    """Synthetic form from the supplied KB Labware_Property_Query.stp example.
+
+    The example proves ReadOnly,"0" and AuditTrailData,")" only, not a universal
+    Properties grammar or a native device parameter layout. No real file is copied.
+    """
+    properties = 'DataDef,Method,1,Properties,\r\n{\r\nReadOnly, "0"\r\n};'
+    audit = 'DataDef,HxPars,3,AuditTrailData,\r\n[\r\n")"\r\n];'
+    return container_text(properties + '\r\n' + (section + '\r\n' if section else '') + audit)
+
+
+def configured_device_hsl():
+    # Existing registered CLSID identifies a selected GUID; the body is a comment
+    # and is never run. Configured tokens below exercise serialization only.
+    return ('// {{ 1 1 0 "configured" "ML_STAR:{54114402-7FA2-11D3-AD85-0004ACB1DCB2}"\n'
+            '// synthetic configured token fixture; no hardware operation\n// }} ""\n')
+
+
 class StrictGrammarTests(unittest.TestCase):
     def test_independent_oracle_rejects_missing_and_trailing_separators(self):
         valid = 'DataDef,HxPars,3,test,\n[\n"first",\n"second"\n];'
@@ -226,6 +244,164 @@ class StpPreservationTests(unittest.TestCase):
                 generator.sync_stp_from_hsl('fixture.hsl', 'fixture.stp')
             cleanup.assert_called_once_with('fixture.stp.sync_fixture.txt')
             write.assert_not_called()
+
+
+class StpReviewRegressionTests(unittest.TestCase):
+    """Real temporary-file cleanup and synthetic sync error propagation."""
+
+    def test_parser_rejects_junk_instead_of_searching_for_next_section(self):
+        first = 'DataDef,HxPars,3,first,["one"];'
+        second = 'DataDef,HxPars,3,second,["two"];'
+        for junk in ('"x"];', 'garbage', ';', 'HxCfgFile,3;', 'ConfigIsValid,Y;'):
+            for text in (junk + first, first + junk + second, first + junk):
+                with self.subTest(text=text), self.assertRaises(ValueError):
+                    generator._parse_existing_stp_sections(text)
+        valid = container_text(first + '\r\n\t' + second)
+        self.assertEqual({'first': first, 'second': second}, generator._parse_existing_stp_sections(valid))
+        with self.assertRaises(ValueError):
+            generator._parse_existing_stp_sections(valid + second)
+
+    def test_partial_conversion_file_is_really_removed_and_stp_unchanged(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hsl, stp = Path(folder, 'fixture.hsl'), Path(folder, 'fixture.stp')
+            hsl.write_text('// synthetic HSL', encoding='utf-8')
+            original = b'synthetic original STP sentinel'
+            stp.write_bytes(original)
+            outputs = []
+            def partial(source, target):
+                outputs.append(target)
+                target.write_text('partial converter output', encoding='latin1')
+                raise OSError('synthetic partial-conversion failure')
+            with patch.object(generator, 'binary_to_text_file', side_effect=partial), \
+                 patch.object(generator, 'transactional_binary_write') as writer:
+                with self.assertRaisesRegex(OSError, 'partial-conversion'):
+                    generator.sync_stp_from_hsl(str(hsl), str(stp))
+                writer.assert_not_called()
+            self.assertEqual(1, len(outputs))
+            self.assertFalse(outputs[0].exists())
+            self.assertEqual(original, stp.read_bytes())
+
+    def test_temp_read_failure_is_distinct_and_really_cleans_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hsl, stp = Path(folder, 'fixture.hsl'), Path(folder, 'fixture.stp')
+            hsl.write_text('// synthetic HSL', encoding='utf-8')
+            original = b'synthetic original STP sentinel'
+            stp.write_bytes(original)
+            outputs, read_text = [], Path.read_text
+            def converted(source, target):
+                outputs.append(target)
+                target.write_text(minimal_stp_text(), encoding='latin1')
+            def cannot_read(path, *args, **kwargs):
+                if path in outputs:
+                    raise OSError('synthetic converted-text read failure')
+                return read_text(path, *args, **kwargs)
+            with patch.object(generator, 'binary_to_text_file', side_effect=converted) as converter, \
+                 patch.object(Path, 'read_text', new=cannot_read), \
+                 patch.object(generator, 'transactional_binary_write') as writer:
+                with self.assertRaisesRegex(OSError, 'converted-text read failure'):
+                    generator.sync_stp_from_hsl(str(hsl), str(stp))
+                converter.assert_called_once()
+                writer.assert_not_called()
+            self.assertFalse(outputs[0].exists())
+            self.assertEqual(original, stp.read_bytes())
+
+    def test_sync_selected_guid_retains_configured_section_before_write(self):
+        section = r'DataDef,HxPars,3,configured,["1SyntheticLabel", "a[0]", "quoted \" ]; value"];'
+        text = minimal_stp_text(section)
+        with tempfile.TemporaryDirectory() as folder:
+            hsl, stp = Path(folder, 'fixture.hsl'), Path(folder, 'fixture.stp')
+            hsl.write_text(configured_device_hsl(), encoding='utf-8')
+            stp.write_bytes(b'synthetic original STP sentinel')
+            def converted(source, target):
+                target.write_text(text, encoding='latin1', newline='')
+            with patch.object(generator, 'binary_to_text_file', side_effect=converted), \
+                 patch.object(generator, 'build_default_stp_section', side_effect=AssertionError('existing GUID defaulted')), \
+                 patch.object(generator, 'transactional_binary_write') as writer:
+                generator.sync_stp_from_hsl(str(hsl), str(stp))
+            writer.assert_called_once()
+            self.assertEqual(str(stp), writer.call_args.args[0])
+            self.assertEqual(section, generator._parse_existing_stp_sections(writer.call_args.args[1])['configured'])
+            self.assertEqual([], list(Path(folder).glob('*.sync_*.txt')))
+
+    def test_on_save_surfaces_stp_failure_and_preserves_existing_stp(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hsl, med, stp = (Path(folder, 'fixture' + ext) for ext in ('.hsl', '.med', '.stp'))
+            hsl.write_text(configured_device_hsl(), encoding='utf-8')
+            med.write_bytes(b'synthetic MED sentinel')
+            original = b'synthetic original STP sentinel'
+            stp.write_bytes(original)
+            def malformed(source, target):
+                target.write_text('DataDef,HxPars,3,configured,["unterminated];', encoding='latin1')
+            with patch.object(generator, 'reconcile_block_marker_headers', side_effect=lambda value: value), \
+                 patch.object(generator, 'renumber_block_markers', side_effect=lambda value: value), \
+                 patch.object(generator, 'sync_med_from_hsl') as med_sync, \
+                 patch.object(generator, 'binary_to_text_file', side_effect=malformed), \
+                 patch.object(generator, 'transactional_binary_write') as writer, \
+                 patch.object(generator, 'update_checksum_in_file') as checksums, \
+                 self.assertLogs(generator.logger, level='ERROR'):
+                with self.assertRaisesRegex(OSError, r'\.stp sync failed') as caught:
+                    generator.correct_block_markers_on_save(str(hsl))
+                self.assertIsInstance(caught.exception.__cause__, ValueError)
+                med_sync.assert_called_once_with(str(hsl), str(med))
+                writer.assert_not_called()
+                checksums.assert_not_called()
+            self.assertEqual(original, stp.read_bytes())
+            self.assertEqual([], list(Path(folder).glob('*.sync_*.txt')))
+
+
+class VendorStpSyncTests(unittest.TestCase):
+    """Native conversion of synthetic STP containers only; no method execution."""
+
+    def _roundtrip_sync(self, selected):
+        try:
+            codec.resolve_converter_path()
+        except FileNotFoundError as exc:
+            if str(exc).startswith('Converter not found at '):
+                self.skipTest(str(exc))
+            raise
+        section = r'DataDef,HxPars,3,configured,["1SyntheticLabel", "a[0]", "quoted \" ]; value"];' if selected else ''
+        expected_tokens = {'AuditTrailData': [')']}
+        if selected:
+            expected_tokens['configured'] = ['1SyntheticLabel', 'a[0]', 'quoted " ]; value']
+        with tempfile.TemporaryDirectory() as folder:
+            hsl, stp, source, before, after = (Path(folder, name) for name in
+                                             ('fixture.hsl', 'fixture.stp', 'source.txt', 'before.txt', 'after.txt'))
+            hsl.write_text(configured_device_hsl() if selected else '// synthetic empty method', encoding='utf-8')
+            source.write_text(minimal_stp_text(section), encoding='latin1', newline='')
+            codec.text_to_binary_file(source, stp)
+            codec.binary_to_text_file(stp, before)
+            existing = generator._parse_existing_stp_sections(before.read_text(encoding='latin1'))
+            expected_keys = {'__Properties__'} | set(expected_tokens)
+            self.assertEqual(expected_keys, set(existing))
+            writer = generator.transactional_binary_write
+            def checked_write(path, text):
+                generated = generator._parse_existing_stp_sections(text)
+                self.assertEqual(expected_keys, set(generated))
+                for key in ('__Properties__', 'configured') if selected else ('__Properties__',):
+                    self.assertEqual(existing[key], generated[key])
+                # AuditTrailData retains the established regenerated-empty policy.
+                self.assertEqual(expected_tokens, {s.key: s.tokens for s in codec.parse_text_med(text).hxpars_sections})
+                return writer(path, text)
+            with patch.object(generator, 'build_default_stp_section', side_effect=AssertionError('unexpected defaults')), \
+                 patch.object(generator, 'transactional_binary_write', side_effect=checked_write) as checked:
+                generator.sync_stp_from_hsl(str(hsl), str(stp))
+                checked.assert_called_once()
+            payload = stp.read_bytes()
+            self.assertEqual(b'\x03\x00\x01\x00', payload[:4])
+            codec.binary_to_text_file(stp, after)
+            models = [codec.parse_binary_med(payload), codec.parse_text_med(after.read_text(encoding='latin1'))]
+            for model in models:
+                self.assertEqual(('Method,Properties', 'ReadOnly', '0'),
+                                 (model.named_section.name, model.named_section.key, model.named_section.value))
+                self.assertEqual(expected_tokens, {s.key: s.tokens for s in model.hxpars_sections})
+                self.assertEqual(len(expected_tokens), len(model.hxpars_sections))
+            self.assertEqual([], list(Path(folder).glob('*.sync_*.txt')))
+
+    def test_minimal_properties_and_audit_only_sync_through_vendor(self):
+        self._roundtrip_sync(False)
+
+    def test_selected_configured_guid_sync_preserves_tokens_through_vendor(self):
+        self._roundtrip_sync(True)
 
 
 class ConverterResolutionTests(unittest.TestCase):
