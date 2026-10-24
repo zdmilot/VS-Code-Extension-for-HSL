@@ -319,6 +319,7 @@ def _unescape_token_from_text(line: str) -> str:
     * ``\\"``  → ``0x22``
     * ``\\n``  → ``0x0A``
     * ``\\r``  → ``0x0D``
+    * ``\\t``  → ``0x09`` (also emitted by the installed converter)
     * ``\\0xHH`` → byte with hex value ``HH``
     * A lone trailing backslash is preserved literally.
 
@@ -365,6 +366,9 @@ def _unescape_token_from_text(line: str) -> str:
             i += 2
         elif nxt == "r":
             out.append(0x0D)  # CR
+            i += 2
+        elif nxt == "t":
+            out.append(0x09)  # TAB; native ASCII converter emits this spelling
             i += 2
         elif nxt == "0" and i + 4 < len(inner) and inner[i + 2] in {"x", "X"}:
             # Hex escape: \0xHH
@@ -924,6 +928,8 @@ def resolve_converter_path() -> Path:
     """Resolve the installed converter or an explicitly configured executable."""
     import os
     override = os.environ.get("HAMILTON_BINARY_ASCII_CONVERTER")
+    if override is not None and not override.strip():
+        raise ValueError("HAMILTON_BINARY_ASCII_CONVERTER is empty; unset it to use the installed default")
     converter = (Path(override).expanduser().resolve() if override is not None
                  else Path(__file__).resolve().parents[3] / CONVERTER_RELATIVE_PATH)
     if not converter.is_file():

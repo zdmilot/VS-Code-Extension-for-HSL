@@ -4,7 +4,6 @@ Synthetic expressions and token names exercise quoting only. Successful containe
 conversion does not establish that VENUS can evaluate those expressions or that
 default device parameters are appropriate for hardware.
 """
-import json
 import os
 from pathlib import Path
 import re
@@ -21,7 +20,7 @@ from standalone_med_tools.checksum import generate_checksum_line
 def strict_sections(text):
     """Independent test oracle: exactly one comma between quoted body tokens."""
     sections = []
-    token_pattern = re.compile(r'"(?:[^"\\\r\n]|\\["\\rnt])*"')
+    token_pattern = re.compile(r'"(?:[^"\\\r\n]|\\(?:0[xX][0-9a-fA-F]{2}|["\\rnt]))*"')
     for header in re.finditer(r'DataDef,HxPars,3,([^,\r\n]+),\s*\[', text):
         cursor, tokens = header.end(), []
         while True:
@@ -30,7 +29,13 @@ def strict_sections(text):
             match = token_pattern.match(text, cursor)
             if not match:
                 raise ValueError('Expected one quoted token in ' + header.group(1))
-            tokens.append(json.loads(match.group(0)))
+            # Native converter observations establish both \0x09 and \t as TAB.
+            # The byte escape is absent from JSON, so use an explicit test table.
+            escapes = {'r': '\r', 'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
+            def decode(escape):
+                value = escape.group(1)
+                return chr(int(value[2:], 16)) if value.lower().startswith('0x') else escapes.get(value, '\\' + value)
+            tokens.append(re.sub(r'\\(0[xX][0-9a-fA-F]{2}|.)', decode, match.group(0)[1:-1]))
             cursor = match.end()
             while cursor < len(text) and text[cursor].isspace():
                 cursor += 1

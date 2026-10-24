@@ -18,3 +18,14 @@ the second checksum pass. All files used by the native converter are synthetic.
 Remaining: postcommit rerun and independent review; prior encoding/variant review
 coverage remains separate. Only the supported minimal Properties/header grammar
 is accepted; unsupported forms fail closed. No physical qualification is claimed.
+
+Encoding/variant follow-up: the native converter independently mapped both
+`\0x09` and `\t` to byte 09, and `\\t` to bytes 5c74. The Python text decoder
+now accepts native TAB output. Empty converter overrides produce an explicit
+configuration error; unsupported Unicode is rejected before container writing.
+The full expanded precommit suite passed 223 cases in a 54.3-second watchdog run,
+including all registered general step variants, all device stubs and both STP
+default builders, Latin-1/control/TAB tokens, and an actual truncated binary
+conversion rejection. The initial six-case boundary run retained three failures;
+its incorrect unknown-escape expectation was corrected using captured native
+binary bytes, not the primary implementation. No speed improvement is claimed.

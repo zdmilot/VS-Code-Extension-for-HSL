@@ -1117,7 +1117,10 @@ def build_device_step_stub(step: HslStepRecord) -> str:
 
 
 def _format_hxpars_section(lines: List[str]) -> str:
-    """Vendor text grammar requires a comma between every HxPars token."""
+    """Vendor text requires separated quoted tokens representable in Latin-1.
+
+    Reject unsupported Unicode before any generated container is written.
+    """
     if (not isinstance(lines, list) or len(lines) < 4 or lines[1] != "[" or lines[-1] != "];"
             or not isinstance(lines[0], str)
             or not re.fullmatch(r'DataDef,HxPars,3,[^,\r\n\[\]"]+,', lines[0])):
@@ -1125,6 +1128,10 @@ def _format_hxpars_section(lines: List[str]) -> str:
     if any(not isinstance(token, str) or not re.fullmatch(r'"(?:[^"\\\r\n]|\\["\\rnt])*"', token)
            for token in lines[2:-1]):
         raise ValueError("Expected individually quoted, escaped HxPars tokens without separators")
+    try:
+        ''.join(lines).encode('latin1')
+    except UnicodeEncodeError as exc:
+        raise ValueError('Hamilton HxCfgFile tokens require Latin-1; unsupported Unicode cannot be serialized') from exc
     return "\r\n".join(lines[:2]) + "\r\n" + ",\r\n".join(lines[2:-1]) + "\r\n];"
 
 
