@@ -126,6 +126,108 @@ class StrictGrammarTests(unittest.TestCase):
         self.assertEqual(5, len(strict_sections(text)))
 
 
+class StpPreservationTests(unittest.TestCase):
+    """Synthetic string fixtures and mocked sync only; no vendor/native calls."""
+
+    def test_quoted_brackets_terminators_and_escaped_quotes_are_preserved(self):
+        section = r'''DataDef,HxPars,3,g,
+[
+"1SequenceName",
+"a[0]",
+"literal ]; and };",
+"escaped \" ]; still quoted",
+"backslash \\ end",
+"DataDef,HxPars,3,not_a_section,["
+];'''
+        self.assertEqual({'g': section}, generator._parse_existing_stp_sections(section))
+        self.assertEqual(['1SequenceName', 'a[0]', 'literal ]; and };',
+                          'escaped " ]; still quoted', 'backslash \\ end',
+                          'DataDef,HxPars,3,not_a_section,['],
+                         codec.parse_text_med(container_text(section)).hxpars_sections[0].tokens)
+
+    def test_multiple_sections_and_properties_retain_exact_original_text(self):
+        properties = r'DataDef,Method,1,Properties,{ReadOnly, "quoted \" }; value"};'
+        first = 'DataDef,HxPars,3,g1,\r\n["a[0]", "b];c"];'
+        second = 'DataDef,HxPars,3,g2,\n[ "other" ];'
+        audit = 'DataDef,HxPars,3,AuditTrailData,["original audit"];'
+        expected = {'__Properties__': properties, 'g1': first, 'g2': second, 'AuditTrailData': audit}
+        self.assertEqual(expected, generator._parse_existing_stp_sections(
+            'HxCfgFile,3;\nConfigIsValid,Y;\n' + '\n\n'.join(expected.values())))
+
+    def test_malformed_or_duplicate_sections_raise_instead_of_disappearing(self):
+        good = 'DataDef,HxPars,3,g,["value"];'
+        malformed = [
+            '', 'HxCfgFile,3;', 'DataDef,HxPars,3,g,{"value"};',
+            'DataDef,HxPars,3,g,["unterminated];', 'DataDef,HxPars,3,g,["value"',
+            'DataDef,HxPars,3,g,["a" "b"];', 'DataDef,HxPars,3,g,["a",];',
+            'DataDef,HxPars,3,g,["a",,"b"];', good + '\n' + good,
+            'DataDef,Method,1,Properties,{ReadOnly,};',
+            'DataDef,Method,1,Properties,{ReadOnly,"unterminated};',
+            'DataDef,Method,1,Properties,{ReadOnly,"0"',
+            'DataDef,Unknown,9,section,["value"];',
+        ]
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                generator._parse_existing_stp_sections(value)
+
+    def test_build_preserves_selected_section_bytes_without_generating_defaults(self):
+        section = r'DataDef,HxPars,3,g,["a[0]", "quoted \" ]; value", "last"];'
+        existing = generator._parse_existing_stp_sections(section)
+        with patch.object(generator, 'build_default_stp_section', side_effect=AssertionError('existing GUID defaulted')):
+            built = generator.build_stp_text({'g': {'clsid': 'unused', 'code': 'unused'}}, existing, author='synthetic')
+        self.assertEqual(section, generator._parse_existing_stp_sections(built)['g'])
+        self.assertEqual(strict_sections(section), [row for row in strict_sections(built) if row[0] == 'g'])
+
+    def test_only_absent_selected_guid_receives_default_and_existing_policy_is_unchanged(self):
+        selected = 'DataDef,HxPars,3,g,["configured[0]"];'
+        orphan = 'DataDef,HxPars,3,orphan,["old"];'
+        audit = 'DataDef,HxPars,3,AuditTrailData,["old audit"];'
+        existing = generator._parse_existing_stp_sections('\n'.join([selected, orphan, audit]))
+        added = 'DataDef,HxPars,3,new,["synthetic default"];'
+        with patch.object(generator, 'build_default_stp_section', return_value=added) as default:
+            built = generator.build_stp_text({'g': {'clsid': 'unused', 'code': 'unused'},
+                                             'new': {'clsid': 'fixture', 'code': 'fixture'}}, existing, author='synthetic')
+        default.assert_called_once_with('new', 'fixture', 'fixture')
+        actual = generator._parse_existing_stp_sections(built)
+        self.assertEqual({'__Properties__', 'g', 'new', 'AuditTrailData'}, set(actual))
+        self.assertEqual(selected, actual['g'])
+        self.assertEqual(added, actual['new'])
+        self.assertNotEqual(audit, actual['AuditTrailData'])
+
+    def test_build_rejects_invalid_existing_mapping_before_default_generation(self):
+        for existing in ({'g': ''}, {'g': 'DataDef,HxPars,3,other,["x"];'},
+                         {'g': 'DataDef,HxPars,3,g,["broken];'}):
+            with self.subTest(existing=existing), patch.object(generator, 'build_default_stp_section') as default:
+                with self.assertRaises(ValueError):
+                    generator.build_stp_text({'g': {'clsid': 'unused', 'code': 'unused'}}, existing)
+                default.assert_not_called()
+
+    def test_sync_parse_failure_propagates_cleans_temp_and_never_writes(self):
+        with patch.object(Path, 'read_text', side_effect=['// synthetic HSL', 'DataDef,HxPars,3,g,["unterminated];']), \
+             patch.object(generator.os.path, 'exists', side_effect=lambda path: str(path).endswith('.stp')), \
+             patch.object(generator, 'binary_to_text_file') as converter, \
+             patch.object(generator, '_unique_temp_suffix', return_value='fixture'), \
+             patch.object(generator, '_safe_unlink') as cleanup, \
+             patch.object(generator, 'transactional_binary_write') as write:
+            with self.assertRaises(ValueError):
+                generator.sync_stp_from_hsl('fixture.hsl', 'fixture.stp')
+            converter.assert_called_once_with(Path('fixture.stp'), Path('fixture.stp.sync_fixture.txt'))
+            cleanup.assert_called_once_with('fixture.stp.sync_fixture.txt')
+            write.assert_not_called()
+
+    def test_sync_read_failure_propagates_cleans_temp_and_never_writes(self):
+        with patch.object(Path, 'read_text', return_value='// synthetic HSL'), \
+             patch.object(generator.os.path, 'exists', side_effect=lambda path: str(path).endswith('.stp')), \
+             patch.object(generator, 'binary_to_text_file', side_effect=OSError('synthetic conversion unavailable')), \
+             patch.object(generator, '_unique_temp_suffix', return_value='fixture'), \
+             patch.object(generator, '_safe_unlink') as cleanup, \
+             patch.object(generator, 'transactional_binary_write') as write:
+            with self.assertRaisesRegex(OSError, 'synthetic conversion unavailable'):
+                generator.sync_stp_from_hsl('fixture.hsl', 'fixture.stp')
+            cleanup.assert_called_once_with('fixture.stp.sync_fixture.txt')
+            write.assert_not_called()
+
+
 class ConverterResolutionTests(unittest.TestCase):
     def test_default_uses_known_tools_relative_location(self):
         expected = Path(codec.__file__).resolve().parents[3] / codec.CONVERTER_RELATIVE_PATH

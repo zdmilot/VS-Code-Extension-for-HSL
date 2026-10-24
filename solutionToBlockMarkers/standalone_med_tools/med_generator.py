@@ -1771,14 +1771,67 @@ def _parse_existing_stp_sections(stp_text: str) -> Dict[str, str]:
         Dict mapping GUID → complete section text.  A special key
         ``__Properties__`` holds the ``DataDef,Method,1,Properties`` section.
     """
+    # Keep original slices: re-emitting could change vendor escaping or native
+    # parameter tokens. Delimiters inside quoted values are data.
     sections: Dict[str, str] = {}
-    for m in re.finditer(r'DataDef,HxPars,3,([^,\s]+),\s*\[([^\]]*)\];', stp_text, re.DOTALL):
-        sections[m.group(1)] = m.group(0)
+    cursor = 0
 
-    prop_m = re.search(r'DataDef,Method,1,Properties,\s*\{([^}]*)\};', stp_text, re.DOTALL)
-    if prop_m:
-        sections["__Properties__"] = prop_m.group(0)
+    def whitespace(position: int) -> int:
+        while position < len(stp_text) and stp_text[position].isspace():
+            position += 1
+        return position
 
+    def quoted(position: int) -> int:
+        if position >= len(stp_text) or stp_text[position] != '"':
+            raise ValueError("Expected quoted token in existing STP section")
+        position += 1
+        while position < len(stp_text):
+            if stp_text[position] == "\\":
+                position += 2
+            elif stp_text[position] == '"':
+                return position + 1
+            else:
+                position += 1
+        raise ValueError("Unterminated quoted token in existing STP section")
+
+    while True:
+        marker = re.search(r'\bDataDef\b', stp_text[cursor:])
+        if marker is None:
+            break
+        start = cursor + marker.start()
+        header = re.match(r'DataDef,HxPars,3,([^,\s\[\]"{}]+),\s*\[', stp_text[start:])
+        properties = re.match(r'DataDef,Method,1,Properties,\s*\{', stp_text[start:])
+        if header:
+            key, closing = header.group(1), "];"
+            if key == "__Properties__":
+                raise ValueError("Reserved existing STP section key")
+        elif properties:
+            header, key, closing = properties, "__Properties__", "};"
+        else:
+            raise ValueError("Malformed or unsupported existing STP section header")
+        if key in sections:
+            raise ValueError("Duplicate existing STP section: " + key)
+        cursor = whitespace(start + header.end())
+        if properties:
+            field = re.match(r'[^,\s{}"]+\s*,\s*', stp_text[cursor:])
+            if not field:
+                raise ValueError("Malformed existing STP Properties field")
+            cursor += field.end()
+            cursor = whitespace(quoted(cursor))
+            if not stp_text.startswith(closing, cursor):
+                raise ValueError("Malformed existing STP Properties terminator")
+        if not stp_text.startswith(closing, cursor):
+            while True:
+                cursor = whitespace(quoted(cursor))
+                if stp_text.startswith(closing, cursor):
+                    break
+                if properties or cursor >= len(stp_text) or stp_text[cursor] != ',':
+                    raise ValueError("Missing separator or terminator in existing STP section: " + key)
+                cursor = whitespace(cursor + 1)
+        cursor += len(closing)
+        sections[key] = stp_text[start:cursor]
+    if not sections:
+        raise ValueError("No existing STP sections found")
     return sections
 
 
@@ -1801,6 +1854,10 @@ def build_stp_text(
         author = os.environ.get("USERNAME", "admin")
     if existing_sections is None:
         existing_sections = {}
+    if existing_sections:
+        validated = _parse_existing_stp_sections("\n".join(existing_sections.values()))
+        if validated != existing_sections:
+            raise ValueError("Existing STP section keys do not match their content")
 
     sections: List[str] = []
 
@@ -1825,7 +1882,7 @@ def build_stp_text(
     for guid in sorted(device_steps.keys()):
         step = device_steps[guid]
         existing = existing_sections.get(guid)
-        if existing:
+        if existing is not None:
             sections.append(existing)
         else:
             sections.append(build_default_stp_section(guid, step["clsid"], step["code"]))
@@ -2102,14 +2159,13 @@ def sync_stp_from_hsl(
     # Read existing .stp sections
     existing_sections: Dict[str, str] = {}
     if os.path.exists(stp_path):
+        tmp_text_path = stp_path + f".sync_{_unique_temp_suffix()}.txt"
         try:
-            tmp_text_path = stp_path + f".sync_{_unique_temp_suffix()}.txt"
             binary_to_text_file(Path(stp_path), Path(tmp_text_path))
             existing_text = Path(tmp_text_path).read_text(encoding="latin1")
             existing_sections = _parse_existing_stp_sections(existing_text)
+        finally:
             _safe_unlink(tmp_text_path)
-        except (OSError, ValueError):
-            existing_sections = {}
 
     # Build and write
     stp_text = build_stp_text(device_steps, existing_sections)
