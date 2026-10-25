@@ -347,23 +347,10 @@ def parse_existing_stp_sections(text: str) -> Dict[str, str]:
         >>> 'my_guid' in sections
         True
     """
-    sections: Dict[str, str] = {}
-    for m in re.finditer(
-        r'DataDef,HxPars,3,([^,\s]+),\s*\[([^\]]*)\];',
-        text,
-        re.DOTALL,
-    ):
-        sections[m.group(1)] = m.group(0)
-
-    prop_m = re.search(
-        r'DataDef,Method,1,Properties,\s*\{([^}]*)\};',
-        text,
-        re.DOTALL,
-    )
-    if prop_m:
-        sections["__Properties__"] = prop_m.group(0)
-
-    return sections
+    # The public STP-only entry point uses the same quote-aware, fail-closed
+    # preservation contract as MED sync. Keep original vendor section slices.
+    from .med_generator import _parse_existing_stp_sections
+    return _parse_existing_stp_sections(text)
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -408,6 +395,8 @@ def build_default_stp_section(guid: str, clsid: str, code: str) -> str:
         >>> '"3AlwaysInitialize"' in section
         True
     """
+    from .med_generator import _escape_string
+
     bare = bare_clsid(clsid)
     step_name = DEVICE_STEP_NAMES.get(bare, "Unknown")
     lines: List[str] = []
@@ -417,7 +406,7 @@ def build_default_stp_section(guid: str, clsid: str, code: str) -> str:
 
     # CommandStepFileGuid -- usually same as instance GUID for simple steps
     lines.append('"1CommandStepFileGuid"')
-    lines.append(f'"{guid}"')
+    lines.append(f'"{_escape_string(guid)}"')
 
     # Try to extract sequence name from code for steps that use sequences
     seq_m = re.search(r'ML_STAR\.(\w+)', code)
@@ -486,7 +475,8 @@ def build_default_stp_section(guid: str, clsid: str, code: str) -> str:
     lines.append('")"')
     lines.append("];")
 
-    return "\r\n".join(lines)
+    from .med_generator import _format_hxpars_section
+    return _format_hxpars_section(lines)
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -536,6 +526,10 @@ def build_stp_text(
         author = os.environ.get("USERNAME", "admin")
     if existing_sections is None:
         existing_sections = {}
+    if existing_sections:
+        validated = parse_existing_stp_sections("\n".join(existing_sections.values()))
+        if validated != existing_sections:
+            raise ValueError("Existing STP mapping does not match its section keys")
 
     sections: List[str] = []
 
@@ -735,14 +729,13 @@ def sync_stp_from_hsl(
     # Read existing .stp sections (if .stp exists) to preserve user config
     existing_sections: Dict[str, str] = {}
     if os.path.exists(stp_path):
+        tmp_text_path = stp_path + f".sync_{_unique_temp_suffix()}.txt"
         try:
-            tmp_text_path = stp_path + f".sync_{_unique_temp_suffix()}.txt"
             binary_to_text_file(Path(stp_path), Path(tmp_text_path))
             existing_text = Path(tmp_text_path).read_text(encoding="latin1")
             existing_sections = parse_existing_stp_sections(existing_text)
+        finally:
             _safe_unlink(tmp_text_path)
-        except (OSError, ValueError):
-            existing_sections = {}
 
     # Build the new .stp text
     stp_text = build_stp_text(device_steps, existing_sections)

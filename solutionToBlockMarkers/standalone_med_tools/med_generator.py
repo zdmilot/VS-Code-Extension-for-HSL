@@ -77,6 +77,7 @@ from .block_markers import (
     generate_instance_guid,
 )
 from .checksum import (
+    RE_CHECKSUM_LINE,
     compute_hsl_checksum,
     generate_checksum_line,
     update_checksum_in_file,
@@ -292,7 +293,10 @@ def _safe_unlink(file_path: str) -> None:
 def _escape_string(s: str) -> str:
     """Escape a string for inclusion inside a quoted .med/.stp token.
 
-    Backslashes, double quotes, and newlines are escaped.
+    Backslashes, double quotes, and newlines are escaped. Other Latin-1
+    characters retain their literal spelling. Native converter regressions
+    verify raw TAB, byte 0x01, and accented Latin-1 characters through populated
+    step builders and HSL-to-MED sync; this does not validate HSL execution.
 
     Args:
         s: Raw string value.
@@ -304,6 +308,7 @@ def _escape_string(s: str) -> str:
         s.replace("\\", "\\\\")
         .replace('"', '\\"')
         .replace("\r\n", "\\r\\n")
+        .replace("\r", "\\r")
         .replace("\n", "\\n")
     )
 
@@ -974,7 +979,7 @@ def _append_step_specific_fields(lines: List[str], clsid: str, code: str) -> Non
         lines.append('"1"')
         lines.append('"1Result"')
         asn = parse_assignment(code)
-        lines.append(f'"{asn["variable"]}"')
+        lines.append(f'"{_escape_string(asn["variable"])}"')
 
     elif bare == STEP_CLSID["Loop"]:
         loop_info = parse_loop_code(code)
@@ -983,18 +988,18 @@ def _append_step_specific_fields(lines: List[str], clsid: str, code: str) -> Non
         lines.append('"1LeftComparisonValue"')
         lines.append('""')
         lines.append('"1LoopCounter"')
-        lines.append(f'"{loop_info["counter"]}"')
+        lines.append(f'"{_escape_string(loop_info["counter"])}"')
         lines.append('"3NbrOfIterations"')
-        lines.append(f'"{loop_info["iterations"]}"')
+        lines.append(f'"{_escape_string(loop_info["iterations"])}"')
 
     elif bare in (STEP_CLSID["SingleLibFunction"], STEP_CLSID["SubmethodCall"]):
         call_info = parse_function_call_code(code)
         is_submethod = bare == STEP_CLSID["SubmethodCall"]
 
         lines.append('"1ReturnValue"')
-        lines.append(f'"{call_info.return_var}"')
+        lines.append(f'"{_escape_string(call_info.return_var)}"')
         lines.append('"1FunctionName"')
-        lines.append(f'"{call_info.function_name}"')
+        lines.append(f'"{_escape_string(call_info.function_name)}"')
         lines.append('"3FieldCount"')
         lines.append(f'"{len(call_info.args)}"')
 
@@ -1033,28 +1038,28 @@ def _append_step_specific_fields(lines: List[str], clsid: str, code: str) -> Non
         lines.append(f'"{value_prefix}ValueToSet"')
         lines.append(f'"{_escape_string(arr_info.value)}"')
         lines.append('"1ArrayName"')
-        lines.append(f'"{arr_info.array_name}"')
+        lines.append(f'"{_escape_string(arr_info.array_name)}"')
 
     elif bare == STEP_CLSID["ArrayDeclare"]:
         arr_info = parse_array_method_call(code)
         lines.append('"1NewSize"')
-        lines.append(f'"{arr_info.value or ""}"')
+        lines.append(f'"{_escape_string(arr_info.value or "")}"')
         lines.append('"1ArrayName"')
-        lines.append(f'"{arr_info.array_name}"')
+        lines.append(f'"{_escape_string(arr_info.array_name)}"')
 
     elif bare == STEP_CLSID["ArrayGetAt"]:
         arr_info = parse_array_method_call(code)
         lines.append('"1ArrayName"')
-        lines.append(f'"{arr_info.array_name}"')
+        lines.append(f'"{_escape_string(arr_info.array_name)}"')
         lines.append('"1Result"')
-        lines.append(f'"{arr_info.return_var}"')
+        lines.append(f'"{_escape_string(arr_info.return_var)}"')
 
     elif bare == STEP_CLSID["ArrayGetSize"]:
         arr_info = parse_array_method_call(code)
         lines.append('"1ArrayName"')
-        lines.append(f'"{arr_info.array_name}"')
+        lines.append(f'"{_escape_string(arr_info.array_name)}"')
         lines.append('"1Result"')
-        lines.append(f'"{arr_info.return_var}"')
+        lines.append(f'"{_escape_string(arr_info.return_var)}"')
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -1111,7 +1116,26 @@ def build_device_step_stub(step: HslStepRecord) -> str:
     lines.append('")"')
     lines.append("];")
 
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
+
+
+def _format_hxpars_section(lines: List[str]) -> str:
+    """Vendor text requires separated quoted tokens representable in Latin-1.
+
+    Reject unsupported Unicode before any generated container is written.
+    """
+    if (not isinstance(lines, list) or len(lines) < 4 or lines[1] != "[" or lines[-1] != "];"
+            or not isinstance(lines[0], str)
+            or not re.fullmatch(r'DataDef,HxPars,3,[^,\r\n\[\]"]+,', lines[0])):
+        raise ValueError("Expected one complete generated HxPars section")
+    if any(not isinstance(token, str) or not re.fullmatch(r'"(?:[^"\\\r\n]|\\["\\rnt])*"', token)
+           for token in lines[2:-1]):
+        raise ValueError("Expected individually quoted, escaped HxPars tokens without separators")
+    try:
+        ''.join(lines).encode('latin1')
+    except UnicodeEncodeError as exc:
+        raise ValueError('Hamilton HxCfgFile tokens require Latin-1; unsupported Unicode cannot be serialized') from exc
+    return "\r\n".join(lines[:2]) + "\r\n" + ",\r\n".join(lines[2:-1]) + "\r\n];"
 
 
 def build_step_section(step: HslStepRecord) -> str:
@@ -1210,7 +1234,7 @@ def build_step_section(step: HslStepRecord) -> str:
 
         # Container -533921792: FunctionName
         lines.append('"(-533921792"')
-        lines.append(f'"({call_info.function_name}"')
+        lines.append(f'"({_escape_string(call_info.function_name)}"')
         lines.append('"(0"')
         lines.append('"10"')
         lines.append('"FunctionName"')
@@ -1229,7 +1253,7 @@ def build_step_section(step: HslStepRecord) -> str:
             lines.append('"(-534118398"')
             for i, arg in enumerate(call_info.args):
                 if not arg.startswith('"') and not re.match(r'^\d+(\.\d+)?$', arg):
-                    lines.append(f'"({arg}"')
+                    lines.append(f'"({_escape_string(arg)}"')
                     lines.append('"(0"')
                     lines.append('"10"')
                     lines.append('"ParamValue"')
@@ -1238,7 +1262,7 @@ def build_step_section(step: HslStepRecord) -> str:
                     lines.append('")"')
                     lines.append('")"')
             if has_return:
-                lines.append(f'"({call_info.return_var}"')
+                lines.append(f'"({_escape_string(call_info.return_var)}"')
                 lines.append('"(0"')
                 lines.append('"10"')
                 lines.append('"ReturnValue"')
@@ -1257,7 +1281,7 @@ def build_step_section(step: HslStepRecord) -> str:
             # ArraySetAt: Index field comes after Timestamp
             if is_array_set_at:
                 lines.append('"1Index"')
-                lines.append(f'"{arr_info.index}"')
+                lines.append(f'"{_escape_string(arr_info.index)}"')
 
             # ArrayDeclare: ArrayTypeCommandKey comes BEFORE Variables
             if is_array_declare:
@@ -1274,7 +1298,7 @@ def build_step_section(step: HslStepRecord) -> str:
                 and not re.match(r'^-?\d+(\.\d+)?$', arr_info.value)
             ):
                 lines.append('"(-534118398"')
-                lines.append(f'"({arr_info.value}"')
+                lines.append(f'"({_escape_string(arr_info.value)}"')
                 lines.append('"(0"')
                 lines.append('"10"')
                 lines.append('"ValueToSet"')
@@ -1284,7 +1308,7 @@ def build_step_section(step: HslStepRecord) -> str:
 
             # ArrayName container
             lines.append('"(-534118349"')
-            lines.append(f'"({arr_info.array_name}"')
+            lines.append(f'"({_escape_string(arr_info.array_name)}"')
             lines.append('"(0"')
             lines.append('"10"')
             lines.append('"ArrayName"')
@@ -1305,10 +1329,10 @@ def build_step_section(step: HslStepRecord) -> str:
                 lines.append('"(Variables"')
                 lines.append('"(-534118398"')
                 for v in var_refs:
-                    lines.append(f'"({v.name}"')
+                    lines.append(f'"({_escape_string(v.name)}"')
                     lines.append('"(0"')
                     lines.append('"10"')
-                    lines.append(f'"{v.role}"')
+                    lines.append(f'"{_escape_string(v.role)}"')
                     lines.append('")"')
                     lines.append('")"')
                 lines.append('")"')
@@ -1317,7 +1341,7 @@ def build_step_section(step: HslStepRecord) -> str:
     lines.append('")"')
     lines.append("];")
 
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -1363,13 +1387,13 @@ def _build_hx_met_ed_data(
     if devices:
         lines.append('"(-533725183"')
         for dev in devices:
-            lines.append(f'"3{dev.name}"')
+            lines.append(f'"3{_escape_string(dev.name)}"')
             lines.append('"1"')
         lines.append('")"')
 
     lines.append('")"')
     lines.append("];")
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
 
 
 def _build_main_definition() -> str:
@@ -1378,7 +1402,7 @@ def _build_main_definition() -> str:
     Returns:
         Complete ``HxMetEd_MainDefinition`` section text.
     """
-    return "\r\n".join([
+    return _format_hxpars_section([
         "DataDef,HxPars,3,HxMetEd_MainDefinition,",
         "[",
         '"3-533725173"',
@@ -1431,7 +1455,7 @@ def _build_submethods_section(submethods: List[SubmethodInfo]) -> str:
             lines.append('"1-533725167"')
             lines.append('""')
             lines.append('"1-533725168"')
-            lines.append(f'"{p["name"]}"')
+            lines.append(f'"{_escape_string(p["name"])}"')
             lines.append('")"')
 
         lines.append('")"')
@@ -1440,7 +1464,7 @@ def _build_submethods_section(submethods: List[SubmethodInfo]) -> str:
         lines.append('"3-533725171"')
         lines.append('"0"')
         lines.append('"1-533725161"')
-        lines.append(f'"{sm.name}"')
+        lines.append(f'"{_escape_string(sm.name)}"')
         lines.append('"3-533725172"')
         lines.append(f'"{1 if sm.builtin else 0}"')
         lines.append('")"')
@@ -1461,7 +1485,7 @@ def _build_submethods_section(submethods: List[SubmethodInfo]) -> str:
     lines.append('")"')
     lines.append("];")
 
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -1674,7 +1698,7 @@ def build_default_stp_section(guid: str, clsid: str, code: str) -> str:
     lines.append("[")
 
     lines.append('"1CommandStepFileGuid"')
-    lines.append(f'"{guid}"')
+    lines.append(f'"{_escape_string(guid)}"')
 
     # Try to extract sequence name from code
     seq_m = re.search(r'ML_STAR\.(\w+)', code)
@@ -1745,7 +1769,7 @@ def build_default_stp_section(guid: str, clsid: str, code: str) -> str:
     lines.append('")"')
     lines.append("];")
 
-    return "\r\n".join(lines)
+    return _format_hxpars_section(lines)
 
 
 def _parse_existing_stp_sections(stp_text: str) -> Dict[str, str]:
@@ -1758,14 +1782,77 @@ def _parse_existing_stp_sections(stp_text: str) -> Dict[str, str]:
         Dict mapping GUID → complete section text.  A special key
         ``__Properties__`` holds the ``DataDef,Method,1,Properties`` section.
     """
+    # Keep original slices: re-emitting could change vendor escaping or native
+    # parameter tokens. Delimiters inside quoted values are data.
     sections: Dict[str, str] = {}
-    for m in re.finditer(r'DataDef,HxPars,3,([^,\s]+),\s*\[([^\]]*)\];', stp_text, re.DOTALL):
-        sections[m.group(1)] = m.group(0)
+    cursor = 0
 
-    prop_m = re.search(r'DataDef,Method,1,Properties,\s*\{([^}]*)\};', stp_text, re.DOTALL)
-    if prop_m:
-        sections["__Properties__"] = prop_m.group(0)
+    def whitespace(position: int) -> int:
+        while position < len(stp_text) and stp_text[position].isspace():
+            position += 1
+        return position
 
+    def quoted(position: int) -> int:
+        if position >= len(stp_text) or stp_text[position] != '"':
+            raise ValueError("Expected quoted token in existing STP section")
+        position += 1
+        while position < len(stp_text):
+            if stp_text[position] == "\\":
+                position += 2
+            elif stp_text[position] == '"':
+                return position + 1
+            else:
+                position += 1
+        raise ValueError("Unterminated quoted token in existing STP section")
+
+    cursor = whitespace(cursor)
+    if stp_text.startswith("HxCfgFile,3;", cursor):
+        cursor = whitespace(cursor + len("HxCfgFile,3;"))
+        if not stp_text.startswith("ConfigIsValid,Y;", cursor):
+            raise ValueError("Unsupported existing STP configuration header")
+        cursor = whitespace(cursor + len("ConfigIsValid,Y;"))
+    while True:
+        cursor = whitespace(cursor)
+        if cursor == len(stp_text):
+            break
+        if stp_text.startswith('*', cursor) and RE_CHECKSUM_LINE.fullmatch(stp_text[cursor:].strip()):
+            break
+        # Do not search past damaged text to a later header: that silently drops
+        # content. Only whitespace or the terminal checksum may separate blocks.
+        start = cursor
+        header = re.match(r'DataDef,HxPars,3,([^,\s\[\]"{}]+),\s*\[', stp_text[start:])
+        properties = re.match(r'DataDef,Method,1,Properties,\s*\{', stp_text[start:])
+        if header:
+            key, closing = header.group(1), "];"
+            if key == "__Properties__":
+                raise ValueError("Reserved existing STP section key")
+        elif properties:
+            header, key, closing = properties, "__Properties__", "};"
+        else:
+            raise ValueError("Malformed or unsupported existing STP section header")
+        if key in sections:
+            raise ValueError("Duplicate existing STP section: " + key)
+        cursor = whitespace(start + header.end())
+        if properties:
+            field = re.match(r'[^,\s{}"]+\s*,\s*', stp_text[cursor:])
+            if not field:
+                raise ValueError("Malformed existing STP Properties field")
+            cursor += field.end()
+            cursor = whitespace(quoted(cursor))
+            if not stp_text.startswith(closing, cursor):
+                raise ValueError("Malformed existing STP Properties terminator")
+        if not stp_text.startswith(closing, cursor):
+            while True:
+                cursor = whitespace(quoted(cursor))
+                if stp_text.startswith(closing, cursor):
+                    break
+                if properties or cursor >= len(stp_text) or stp_text[cursor] != ',':
+                    raise ValueError("Missing separator or terminator in existing STP section: " + key)
+                cursor = whitespace(cursor + 1)
+        cursor += len(closing)
+        sections[key] = stp_text[start:cursor]
+    if not sections:
+        raise ValueError("No existing STP sections found")
     return sections
 
 
@@ -1788,6 +1875,10 @@ def build_stp_text(
         author = os.environ.get("USERNAME", "admin")
     if existing_sections is None:
         existing_sections = {}
+    if existing_sections:
+        validated = _parse_existing_stp_sections("\n".join(existing_sections.values()))
+        if validated != existing_sections:
+            raise ValueError("Existing STP section keys do not match their content")
 
     sections: List[str] = []
 
@@ -1812,7 +1903,7 @@ def build_stp_text(
     for guid in sorted(device_steps.keys()):
         step = device_steps[guid]
         existing = existing_sections.get(guid)
-        if existing:
+        if existing is not None:
             sections.append(existing)
         else:
             sections.append(build_default_stp_section(guid, step["clsid"], step["code"]))
@@ -2089,14 +2180,13 @@ def sync_stp_from_hsl(
     # Read existing .stp sections
     existing_sections: Dict[str, str] = {}
     if os.path.exists(stp_path):
+        tmp_text_path = stp_path + f".sync_{_unique_temp_suffix()}.txt"
         try:
-            tmp_text_path = stp_path + f".sync_{_unique_temp_suffix()}.txt"
             binary_to_text_file(Path(stp_path), Path(tmp_text_path))
             existing_text = Path(tmp_text_path).read_text(encoding="latin1")
             existing_sections = _parse_existing_stp_sections(existing_text)
+        finally:
             _safe_unlink(tmp_text_path)
-        except (OSError, ValueError):
-            existing_sections = {}
 
     # Build and write
     stp_text = build_stp_text(device_steps, existing_sections)
@@ -2125,15 +2215,18 @@ def correct_block_markers_on_save(file_path: str) -> None:
     1. Reconciles block marker headers with actual code
     2. Applies cross-file row numbering
     3. Writes corrected content back to disk (only if changed)
-    4. Re-syncs the companion .med from the corrected .hsl + .sub
-    5. Re-syncs the companion .stp for device steps
-    6. Updates checksums on .hsl and .sub text files
+    4. Updates checksums on .hsl and .sub text files
+    5. Re-syncs the companion .med from the corrected .hsl + .sub
+    6. Re-syncs the companion .stp for device steps
 
     Args:
         file_path: Path to the saved .hsl or .sub file.
 
     Raises:
-        OSError: If .med sync fails (propagated for caller to report).
+        OSError: If .med or .stp sync fails (propagated for caller to report).
+            The .med may already have been updated when a later .stp sync fails.
+            Text checksums are updated first; the companion files are not one
+            atomic transaction. Checksum update errors are logged.
     """
     # Guard 1: must be .hsl or .sub
     is_hsl = file_path.lower().endswith(".hsl")
@@ -2244,6 +2337,15 @@ def correct_block_markers_on_save(file_path: str) -> None:
                 except OSError:
                     pass
 
+    # Text edits have already happened. Finalize their checksums before a
+    # binary companion failure can interrupt the remaining sync operations.
+    for f in (hsl_path, sub_path):
+        if os.path.exists(f):
+            try:
+                update_checksum_in_file(f)
+            except (ValueError, OSError) as e:
+                logger.error("Checksum update failed for %s: %s", os.path.basename(f), e)
+
     # Step 3: Sync .med
     if has_med:
         try:
@@ -2261,18 +2363,7 @@ def correct_block_markers_on_save(file_path: str) -> None:
         logger.error(
             ".stp sync failed for %s: %s", os.path.basename(hsl_path), e
         )
-        # Non-fatal
-
-    # Step 5: Update checksums on text companion files (.hsl, .sub only)
-    for f in (hsl_path, sub_path):
-        if os.path.exists(f):
-            try:
-                update_checksum_in_file(f)
-            except (ValueError, OSError) as e:
-                logger.error(
-                    "Checksum update failed for %s: %s", os.path.basename(f), e
-                )
-
+        raise OSError(f".stp sync failed: {e}") from e
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # CLI Entry Point

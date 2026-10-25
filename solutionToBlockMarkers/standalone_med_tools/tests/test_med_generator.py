@@ -384,7 +384,7 @@ class TestExtractActivityDataRoundtrip(unittest.TestCase):
     """Round-trip test: build → write → extract preserves step count.
 
     These tests touch the filesystem and require the codec to be functional.
-    They are skipped if the codec raises during conversion.
+    They are skipped only when the required converter executable is absent.
     """
 
     def test_extract_activity_data_roundtrip(self):
@@ -410,9 +410,9 @@ class TestExtractActivityDataRoundtrip(unittest.TestCase):
         self.assertIn("AAAA", med_text)
         self.assertIn("guid_rt_001", med_text)
 
-        # Attempt binary round-trip (may fail if codec has issues)
+        # Conversion and assertion failures must remain visible as test failures.
         try:
-            from standalone_med_tools.hxcfgfile_codec import text_to_binary_file
+            from standalone_med_tools.hxcfgfile_codec import text_to_binary_file, binary_to_text_file, parse_text_med, parse_binary_med
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 text_path = os.path.join(tmpdir, "test.med.txt")
@@ -423,11 +423,25 @@ class TestExtractActivityDataRoundtrip(unittest.TestCase):
 
                 from pathlib import Path as P
                 text_to_binary_file(P(text_path), P(bin_path))
+                binary = P(bin_path).read_bytes()
+                self.assertEqual(binary[:4], b"\x03\x00\x01\x00")
+                expected = parse_text_med(med_text)
+                binary_model = parse_binary_med(binary)
+                converted_path = P(tmpdir) / "vendor-roundtrip.txt"
+                binary_to_text_file(P(bin_path), converted_path)
+                converted = parse_text_med(converted_path.read_text(encoding="latin1"))
+                # Vendor conversion canonically reorders named sections. Compare
+                # every complete section while retaining each token's order.
+                expected_sections = sorted((section.key, section.tokens) for section in expected.hxpars_sections)
+                self.assertEqual(expected_sections, sorted((section.key, section.tokens) for section in binary_model.hxpars_sections))
+                self.assertEqual(expected_sections, sorted((section.key, section.tokens) for section in converted.hxpars_sections))
 
                 activity = extract_activity_data_from_med(bin_path)
                 self.assertEqual(activity, "AAAA")
-        except Exception as exc:
-            self.skipTest(f"Codec round-trip not available: {exc}")
+        except FileNotFoundError as exc:
+            if str(exc).startswith("Converter not found at "):
+                self.skipTest(f"Codec round-trip not available: {exc}")
+            raise
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -469,8 +483,17 @@ class TestSyncMedFromHsl(unittest.TestCase):
                 )
                 # The generated file should have non-trivial size
                 self.assertGreater(os.path.getsize(med_path), 0)
-        except Exception as exc:
-            self.skipTest(f"sync_med_from_hsl not runnable in test env: {exc}")
+                from pathlib import Path
+                from standalone_med_tools.hxcfgfile_codec import parse_binary_med
+                binary = Path(med_path).read_bytes()
+                self.assertEqual(binary[:4], b"\x03\x00\x01\x00")
+                model = parse_binary_med(binary)
+                self.assertEqual(model.named_section.value, "AAAA")
+                self.assertGreaterEqual(len(model.hxpars_sections), 4)
+        except FileNotFoundError as exc:
+            if str(exc).startswith("Converter not found at "):
+                self.skipTest(f"sync_med_from_hsl not runnable in test env: {exc}")
+            raise
 
 
 # ═════════════════════════════════════════════════════════════════════════════

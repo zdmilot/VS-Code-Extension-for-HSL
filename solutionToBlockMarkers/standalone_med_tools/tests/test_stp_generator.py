@@ -185,9 +185,9 @@ class TestBuildStpText(unittest.TestCase):
         existing_section = (
             'DataDef,HxPars,3,guid_existing,\r\n'
             '[\r\n'
-            '"1CustomField"\r\n'
-            '"custom_value"\r\n'
-            '");'
+            '"1CustomField",\r\n'
+            '"custom_value",\r\n'
+            '")"'
             '\r\n];'
         )
         existing = {"guid_existing": existing_section}
@@ -199,6 +199,7 @@ class TestBuildStpText(unittest.TestCase):
         }
         text = build_stp_text(device_steps, existing_sections=existing, author="TestUser")
         self.assertIn("custom_value", text)
+        self.assertEqual(existing_section, parse_existing_stp_sections(text)["guid_existing"])
 
 
 @unittest.skipUnless(_IMPORT_OK, f"Import failed: {globals().get('_IMPORT_ERR', '')}")
@@ -206,10 +207,9 @@ class TestParseExistingStpSections(unittest.TestCase):
     """Tests for parse_existing_stp_sections."""
 
     def test_parse_existing_stp_sections_empty(self):
-        """Empty text returns empty dict."""
-        result = parse_existing_stp_sections("")
-        self.assertIsInstance(result, dict)
-        self.assertEqual(len(result), 0)
+        """Empty existing text must not authorize overwriting configured steps."""
+        with self.assertRaises(ValueError):
+            parse_existing_stp_sections("")
 
     def test_parse_existing_stp_sections_roundtrip(self):
         """Build then parse preserves section count."""

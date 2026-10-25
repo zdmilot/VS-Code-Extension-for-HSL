@@ -319,6 +319,7 @@ def _unescape_token_from_text(line: str) -> str:
     * ``\\"``  → ``0x22``
     * ``\\n``  → ``0x0A``
     * ``\\r``  → ``0x0D``
+    * ``\\t``  → ``0x09`` (also emitted by the installed converter)
     * ``\\0xHH`` → byte with hex value ``HH``
     * A lone trailing backslash is preserved literally.
 
@@ -365,6 +366,9 @@ def _unescape_token_from_text(line: str) -> str:
             i += 2
         elif nxt == "r":
             out.append(0x0D)  # CR
+            i += 2
+        elif nxt == "t":
+            out.append(0x09)  # TAB; native ASCII converter emits this spelling
             i += 2
         elif nxt == "0" and i + 4 < len(inner) and inner[i + 2] in {"x", "X"}:
             # Hex escape: \0xHH
@@ -671,7 +675,10 @@ def parse_binary_med(binary_data: bytes) -> HxCfgTextModel:
 def build_text_med(model: HxCfgTextModel) -> str:
     """Build the textual HxCfgFile representation from a model.
 
-    The output mirrors what ``HxCfgFilConverter.exe /t`` produces:
+    The output preserves the model's decoded token values, with the following
+    structure. Formatting and escape spelling can differ from the native
+    converter (for example, byte escapes versus TAB escapes or raw Latin-1).
+    Semantic token equivalence does not imply native text or byte identity:
 
     1. A fixed header (``HxCfgFile,3;`` + ``ConfigIsValid,Y;``).
     2. An optional ``DataDef`` block for the named section.
@@ -916,6 +923,23 @@ def build_binary_med(model: HxCfgTextModel) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+CONVERTER_RELATIVE_PATH = (Path("Programatic Method and Venus File Generation Playground") / "tooling" /
+                           "Hamilton-Binary-ASCII-Converter" / "Hamilton-Binary-ASCII-Converter.exe")
+
+
+def resolve_converter_path() -> Path:
+    """Resolve the installed converter or an explicitly configured executable."""
+    import os
+    override = os.environ.get("HAMILTON_BINARY_ASCII_CONVERTER")
+    if override is not None and not override.strip():
+        raise ValueError("HAMILTON_BINARY_ASCII_CONVERTER is empty; unset it to use the installed default")
+    converter = (Path(override).expanduser().resolve() if override is not None
+                 else Path(__file__).resolve().parents[3] / CONVERTER_RELATIVE_PATH)
+    if not converter.is_file():
+        raise FileNotFoundError(f"Converter not found at {converter}")
+    return converter
+
+
 def binary_to_text_file(input_path: Path, output_path: Path) -> None:
     """Convert a binary .med/.stp file to its textual representation using the CLI converter.
 
@@ -924,9 +948,7 @@ def binary_to_text_file(input_path: Path, output_path: Path) -> None:
         output_path: Path where the text output will be written.
     """
     import subprocess
-    converter = Path(r"C:\Program Files (x86)\Hamilton\7 - Created Utilities and Scripts\Programatic Method and Venus File Generation Playground\tooling\Hamilton-Binary-ASCII-Converter\Hamilton-Binary-ASCII-Converter.exe")
-    if not converter.exists():
-        raise FileNotFoundError(f"Converter not found at {converter}")
+    converter = resolve_converter_path()
     
     subprocess.run([str(converter), "--ascii", str(input_path), "--output", str(output_path), "--no-backup"], check=True)
 
@@ -939,9 +961,7 @@ def text_to_binary_file(input_path: Path, output_path: Path) -> None:
         output_path: Path where the binary output will be written.
     """
     import subprocess
-    converter = Path(r"C:\Program Files (x86)\Hamilton\7 - Created Utilities and Scripts\Programatic Method and Venus File Generation Playground\tooling\Hamilton-Binary-ASCII-Converter\Hamilton-Binary-ASCII-Converter.exe")
-    if not converter.exists():
-        raise FileNotFoundError(f"Converter not found at {converter}")
+    converter = resolve_converter_path()
     
     subprocess.run([str(converter), "--binary", str(input_path), "--output", str(output_path), "--no-backup"], check=True)
 
